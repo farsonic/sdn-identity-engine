@@ -1,0 +1,2828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SDN Identity Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              brand: { 50: '#e6f4ef', 100: '#c0e5d8', 400: '#3eb692', 500: '#1f9c7a', 600: '#0e8669', 700: '#0a6b54', 800: '#06513f' },
+              ink:   { 50: '#fafafa', 100: '#f5f5f7', 200: '#eaeaec', 300: '#d9d9dc', 400: '#bfbfc4', 500: '#8c8c93', 600: '#595962', 700: '#3a3a42', 900: '#1c1c20' },
+              success: { 50: '#f6ffed', 500: '#52c41a', 600: '#3f9a14' },
+              warning: { 50: '#fffbe6', 500: '#faad14', 600: '#c98a0e' },
+              danger:  { 50: '#fff1f0', 500: '#ff4d4f', 600: '#cc3d3f' },
+              info:    { 50: '#e6f4ff', 500: '#1890ff', 600: '#1374cc' },
+            },
+            fontFamily: {
+              sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', '"Helvetica Neue"', 'Helvetica', 'Arial', 'sans-serif'],
+              mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+            },
+          }
+        }
+      };
+    </script>
+    <style>
+        body {
+            background-color: #f5f5f7;
+            color: rgba(0, 0, 0, 0.88);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            margin: 0;
+            font-size: 14px;
+        }
+
+        /* Sidebar */
+        #sidebar { width: 240px; transition: width 0.2s ease; }
+        body.sidebar-collapsed #sidebar { width: 56px; }
+        body.sidebar-collapsed .nav-label,
+        body.sidebar-collapsed .nav-section { display: none; }
+        body.sidebar-collapsed .nav-item { justify-content: center; padding-left: 0; padding-right: 0; }
+
+        .nav-item.active { color: #0a6b54; background-color: #e6f4ef; border-left-color: #0e8669; }
+        .nav-item { border-left: 3px solid transparent; transition: all 0.15s; }
+        .nav-item:not(.active):hover { background-color: #f5f5f7; color: #1c1c20; }
+
+        /* Views */
+        .view { display: none; }
+        .view.active { display: block; }
+
+        /* Tabs */
+        .om-tab.active { color: #0a6b54; border-bottom-color: #0e8669; }
+        .om-tab { border-bottom-color: transparent; transition: color 0.15s, border-color 0.15s; }
+
+        /* Filter pills */
+        .filter-pill { transition: all 0.15s; }
+        .filter-pill.active { background-color: #e6f4ef; color: #0a6b54; border-color: #c0e5d8; }
+        .filter-pill:not(.active):hover { background-color: #fafafa; }
+
+        /* ============ TABLE (Ant Design match) ============ */
+        .om-table { table-layout: fixed; border-collapse: collapse; }
+        .om-table th { position: relative; user-select: none; }
+
+        .om-table thead th {
+            padding: 9px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            color: rgba(0, 0, 0, 0.55);
+            text-transform: uppercase;
+            text-align: left;
+            background: #fafafa;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .om-table tbody td {
+            padding: 8px 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            color: rgba(0, 0, 0, 0.85);
+            border-bottom: 1px solid #f0f0f0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            background: white;
+        }
+        .om-table tbody tr:last-child td { border-bottom: none; }
+        .om-table tbody tr:hover td { background: #fafbfc; }
+        .om-table tbody td.allow-wrap { white-space: normal; padding: 16px 20px; background: #fafafa; }
+
+        /* Muted secondary value (IP, dimmed text under primary) */
+        .om-table tbody td.muted { color: rgba(0, 0, 0, 0.55); }
+
+        /* Tiny signal glyphs after the status text — single character size, no background */
+        .signal-glyph {
+            display: inline-block; font-size: 11px; line-height: 1;
+            margin-left: 4px; color: rgba(0, 0, 0, 0.35);
+            cursor: help; transition: color 0.15s;
+        }
+        .signal-glyph:hover { color: rgba(0, 0, 0, 0.75); }
+        .signal-glyph.on-notes  { color: #0e8669; }
+        .signal-glyph.on-fp     { color: #1677ff; }
+        .signal-glyph.on-mdns   { color: #8b5cf6; }
+        .signal-glyph.on-ai-h   { color: #8b5cf6; }
+        .signal-glyph.on-ai-m   { color: #c98a0e; }
+        .signal-glyph.on-ai-l   { color: #c0464a; }
+
+        /* Columns picker panel (toggled visible) */
+        .columns-panel {
+            position: absolute; top: calc(100% + 6px); right: 0;
+            background: white; border: 1px solid #d9d9dc; border-radius: 4px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.10); width: 280px; z-index: 30;
+            font-size: 13px;
+        }
+        .columns-panel.hidden { display: none; }
+        .columns-panel-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 14px; border-bottom: 1px solid #f0f0f0;
+        }
+        .columns-panel-presets {
+            padding: 10px 14px; border-bottom: 1px solid #f0f0f0;
+            display: flex; flex-direction: column; gap: 6px;
+        }
+        .columns-panel-preset {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 13px; cursor: pointer; padding: 2px 0;
+            color: rgba(0,0,0,0.75);
+        }
+        .columns-panel-preset input { accent-color: #0e8669; }
+        .columns-panel-list {
+            padding: 8px 14px; max-height: 360px; overflow-y: auto;
+        }
+        .columns-panel-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 0; font-size: 13px; cursor: pointer;
+            color: rgba(0,0,0,0.75);
+        }
+        .columns-panel-item.disabled { color: rgba(0,0,0,0.35); cursor: default; }
+        .columns-panel-item input { accent-color: #0e8669; }
+        .columns-panel-item:hover:not(.disabled) { color: rgba(0,0,0,0.95); }
+
+        /* Proposed-cell "in sync" muted check */
+        .in-sync { color: rgba(0,0,0,0.35); }
+
+        /* Group header rows — span full table, subtle background, click to collapse */
+        .om-table tbody tr.group-header td {
+            background: #f7f8fa;
+            border-top: 1px solid #e8e9ec;
+            border-bottom: 1px solid #e8e9ec;
+            padding: 7px 16px;
+            font-size: 12px;
+            font-weight: 500;
+            color: rgba(0,0,0,0.75);
+            cursor: pointer;
+            user-select: none;
+        }
+        .om-table tbody tr.group-header:hover td { background: #f0f2f5; }
+        .om-table tbody tr.group-header td .group-chevron {
+            display: inline-block; width: 12px; text-align: center;
+            color: rgba(0,0,0,0.45); margin-right: 6px;
+            transition: transform 0.15s;
+        }
+        .om-table tbody tr.group-header td .group-count {
+            color: rgba(0,0,0,0.45); font-weight: 400; margin-left: 6px;
+        }
+        .om-table tbody tr.group-header td .group-label {
+            color: rgba(0,0,0,0.85);
+        }
+
+        /* Hidden rows inside a collapsed group */
+        .row-hidden { display: none !important; }
+
+        /* Sort carets in column headers */
+        .col-header-label {
+            cursor: pointer;
+            user-select: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: color 0.15s;
+        }
+        .col-header-label:hover { color: rgba(0,0,0,0.85); }
+        .sort-caret {
+            font-size: 9px;
+            color: rgba(0,0,0,0.25);
+            transition: color 0.15s;
+            line-height: 1;
+        }
+        .col-header-label:hover .sort-caret { color: rgba(0,0,0,0.55); }
+        .sort-caret.active { color: #0e8669; }
+
+        /* Sticky right action column (Omada style: ant-table-cell-fix-right) */
+        .om-table thead th:last-child,
+        .om-table tbody td:last-child {
+            position: sticky;
+            right: 0;
+            z-index: 2;
+            box-shadow: -4px 0 6px -2px rgba(0,0,0,0.04);
+        }
+
+        /* Column resizer handle */
+        .col-resizer {
+            position: absolute; right: -3px; top: 0; bottom: 0; width: 6px;
+            cursor: col-resize; z-index: 5;
+        }
+        .col-resizer:hover, .col-resizer.active { background: rgba(14, 134, 105, 0.35); }
+        body.resizing { user-select: none; cursor: col-resize !important; }
+
+        /* Column filter popover */
+        .col-filter-trigger {
+            opacity: 0.45; transition: opacity 0.15s, color 0.15s;
+            cursor: pointer; padding: 2px; display: inline-flex; align-items: center;
+        }
+        .col-filter-trigger:hover { opacity: 1; color: #0e8669; }
+        .col-filter-trigger.has-value { opacity: 1; color: #0e8669; }
+        .col-filter-popover {
+            position: absolute; top: calc(100% + 4px); left: 0;
+            background: white; border: 1px solid #d9d9dc; border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08); padding: 8px;
+            min-width: 200px; z-index: 20;
+        }
+        .col-filter-popover input { width: 100%; padding: 4px 8px; border: 1px solid #d9d9dc; border-radius: 3px; font-size: 12px; font-family: inherit; }
+
+        /* Detail row */
+        .detail-pane { display: none; }
+        .expanded { display: table-row; }
+
+        /* Status dot */
+        .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+
+        /* Mismatch indicator on proposed names */
+        .mismatch { color: #c98a0e; }
+
+        /* JSON tree (light) - keep mono here for actual code */
+        .json-tree { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.6; }
+        .json-key { color: #595962; }
+        .json-val { color: #0e8669; margin-left: 4px; }
+        .json-nest { padding-left: 16px; border-left: 1px solid #eaeaec; margin-top: 2px; }
+
+        /* Device icon thumbnail */
+        .dev-icon { width: 24px; height: 24px; background: #f5f5f7; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; color: #8c8c93; font-size: 12px; }
+
+        /* Action icon buttons */
+        .action-icon { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; transition: all 0.15s; cursor: pointer; }
+        .action-icon svg { width: 14px; height: 14px; }
+        .action-icon:hover { background-color: #f5f5f7; }
+        .action-icon[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-thumb { background: #d9d9dc; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #bfbfc4; }
+    </style>
+</head>
+<body>
+
+<!-- ================ TOP HEADER ================ -->
+<header class="bg-brand-600 h-14 flex items-center px-4 text-white text-sm sticky top-0 z-30">
+    <button id="sidebar-toggle" class="hover:bg-white/10 p-2 rounded mr-2 transition" title="Toggle sidebar">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+    <div class="flex items-center gap-2 font-medium">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a2 2 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <span id="site-label">—</span>
+    </div>
+    <div class="flex-1 text-center"><span class="font-medium tracking-tight" id="view-title">SDN Identity Engine</span></div>
+    <button onclick="loadData()" class="hover:bg-white/10 p-2 rounded transition" title="Refresh">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+    </button>
+</header>
+
+<div class="flex" style="min-height: calc(100vh - 56px)">
+
+    <!-- ================ LEFT SIDEBAR ================ -->
+    <aside id="sidebar" class="bg-white border-r border-ink-200 flex-shrink-0 overflow-hidden">
+        <nav class="py-3">
+            <div class="nav-section px-4 pt-2 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Management</div>
+            <a href="#" data-target="clients" class="nav-item active flex items-center gap-3 px-4 py-2 text-sm font-medium" title="Clients">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17a4 4 0 01-2-7.5 4 4 0 014.5-4.5 5 5 0 019.5 2.5 4 4 0 01-2 7.5H9z"/></svg>
+                <span class="nav-label">Clients</span>
+            </a>
+
+            <div class="nav-section px-4 pt-5 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Identity</div>
+            <a href="#" data-target="policy" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Naming Policy">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                <span class="nav-label">Naming Policy</span>
+            </a>
+            <a href="#" data-target="ai-model" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="AI Models">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                <span class="nav-label">AI Models</span>
+            </a>
+
+            <div class="nav-section px-4 pt-5 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Telemetry</div>
+            <a href="#" data-target="dhcp" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="DHCP Capture">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/></svg>
+                <span class="nav-label">DHCP Capture</span>
+            </a>
+            <a href="#" data-target="fingerbank" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Fingerbank">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                <span class="nav-label">Fingerbank</span>
+            </a>
+
+            <div class="nav-section px-4 pt-5 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Configuration</div>
+            <a href="#" data-target="settings" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Settings">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <span class="nav-label">Settings</span>
+            </a>
+        </nav>
+    </aside>
+
+    <!-- ================ MAIN CONTENT ================ -->
+    <main class="flex-1 px-6 py-5 max-w-full overflow-x-hidden">
+
+        <!-- ==================== VIEW: CLIENTS ==================== -->
+        <div id="view-clients" class="view active space-y-4">
+
+            <!-- Action toolbar -->
+            <div class="bg-white border border-ink-200 rounded px-4 py-3 flex items-center gap-3 flex-wrap">
+                <h2 class="text-lg font-medium text-ink-900">All Clients</h2>
+                <div class="ml-auto flex items-center gap-2">
+                    <button onclick="scanUnidentified()" id="scan-btn" class="bg-white border border-ink-300 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-sm font-medium px-4 py-1.5 rounded transition">🧠 Scan Unidentified</button>
+                    <button onclick="openChat('all')" id="chat-btn" class="bg-white border border-ink-300 hover:border-info-500 hover:text-info-500 text-ink-700 text-sm font-medium px-4 py-1.5 rounded transition" title="Ask Gemini about your network or a specific device">💬 Chat</button>
+                    <button onclick="openHarmonize()" id="harmonize-btn" class="bg-white border border-ink-300 hover:border-purple-500 hover:text-purple-700 text-ink-700 text-sm font-medium px-4 py-1.5 rounded transition" title="Use Gemini to reconcile inconsistent names across device clusters">🪄 Harmonize Names</button>
+                    <button onclick="syncAll()" id="sync-all-btn" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-4 py-1.5 rounded transition">Sync All Mismatched</button>
+                </div>
+            </div>
+
+            <div id="dhcp-status-banner"></div>
+            <div id="error-banner"></div>
+
+            <!-- Main client list card -->
+            <section class="bg-white border border-ink-200 rounded overflow-hidden">
+
+                <!-- Stat counters -->
+                <div class="px-6 py-4 flex flex-wrap items-center gap-x-10 gap-y-3 border-b border-ink-200">
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#e6f4ef;color:#0e8669;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17a4 4 0 01-2-7.5 4 4 0 014.5-4.5 5 5 0 019.5 2.5 4 4 0 01-2 7.5H9z"/></svg>
+                        </div>
+                        <div><div id="stat-total" class="text-2xl font-medium text-ink-900 leading-tight">—</div><div class="text-[12px] text-ink-500">Total Devices</div></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#f6ffed;color:#52c41a;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                        </div>
+                        <div><div id="stat-identified" class="text-2xl font-medium text-success-600 leading-tight">—</div><div class="text-[12px] text-ink-500">Identified</div></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#fffbe6;color:#faad14;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </div>
+                        <div><div id="stat-unidentified" class="text-2xl font-medium text-warning-600 leading-tight">—</div><div class="text-[12px] text-ink-500">Unidentified</div></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#e6f4ff;color:#1890ff;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </div>
+                        <div><div id="stat-new" class="text-2xl font-medium text-info-500 leading-tight">—</div><div class="text-[12px] text-ink-500">New (7d)</div></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#e6f4ff;color:#1890ff;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/></svg>
+                        </div>
+                        <div><div id="stat-fp" class="text-2xl font-medium text-ink-900 leading-tight">—</div><div class="text-[12px] text-ink-500">DHCP Fingerprints</div></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="dev-icon" style="width:44px;height:44px;background:#f6ffed;color:#3f9a14;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                        </div>
+                        <div><div id="stat-notes" class="text-2xl font-medium text-ink-900 leading-tight">—</div><div class="text-[12px] text-ink-500">Owner Notes</div></div>
+                    </div>
+                </div>
+
+                <!-- Search + filter pills -->
+                <div class="px-6 py-3 flex flex-wrap items-center gap-3 border-b border-ink-200">
+                    <div class="relative">
+                        <input id="search-input" type="text" placeholder="Search Name, MAC, IP" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-900 pl-3 pr-8 py-1.5 rounded w-72 transition">
+                        <svg class="w-4 h-4 text-ink-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    </div>
+                    <div class="flex items-center gap-1 flex-wrap">
+                        <button data-filter="all"          class="filter-pill active text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200">All <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="all">0</span>)</span></button>
+                        <button data-filter="unidentified" class="filter-pill text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200 text-ink-700"><span class="dot bg-warning-500"></span>Unidentified <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="unidentified">0</span>)</span></button>
+                        <button data-filter="new"          class="filter-pill text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200 text-ink-700"><span class="dot bg-info-500"></span>New (7d) <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="new">0</span>)</span></button>
+                        <button data-filter="notes"        class="filter-pill text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200 text-ink-700"><span class="dot bg-success-500"></span>With Notes <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="notes">0</span>)</span></button>
+                        <button data-filter="ai"           class="filter-pill text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200 text-ink-700"><span class="dot" style="background:#9333ea"></span>AI Identified <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="ai">0</span>)</span></button>
+                        <button data-filter="fingerprint"  class="filter-pill text-[12px] font-medium px-3 py-1.5 rounded-full border border-ink-200 text-ink-700"><span class="dot bg-info-500"></span>DHCP FP <span class="ml-1 text-ink-500">(<span class="filter-count" data-for="fingerprint">0</span>)</span></button>
+                    </div>
+                    <div class="ml-auto flex items-center gap-3">
+                        <div class="text-[12px] text-ink-500" id="filter-count">—</div>
+                        <div class="relative">
+                            <button id="groupby-btn" type="button" class="bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-medium px-3 py-1.5 rounded transition inline-flex items-center gap-1.5" title="Group rows by a column">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M7 12h10M10 18h4"/></svg>
+                                <span>Group: <span id="groupby-label" class="font-normal text-ink-500">None</span></span>
+                            </button>
+                            <div id="groupby-panel" class="columns-panel hidden"></div>
+                        </div>
+                        <div class="relative">
+                            <button id="columns-btn" type="button" class="bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-medium px-3 py-1.5 rounded transition inline-flex items-center gap-1.5" title="Show/hide columns">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+                                Columns
+                            </button>
+                            <div id="columns-panel" class="columns-panel hidden"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Table -->
+                <div class="overflow-x-auto">
+                    <table id="client-table" class="om-table w-full">
+                        <colgroup id="client-colgroup">
+                            <!-- Populated by buildTableStructure() based on visibleColumns -->
+                        </colgroup>
+                        <thead>
+                            <tr id="client-thead-row">
+                                <!-- Populated by buildTableStructure() based on visibleColumns -->
+                            </tr>
+                        </thead>
+                        <tbody id="client-list" class="text-ink-900"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- ==================== VIEW: NAMING POLICY ==================== -->
+        <div id="view-policy" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <h2 class="text-lg font-medium text-ink-900 mb-1">Naming Policy</h2>
+                <p class="text-[13px] text-ink-600 mb-5">The template defines how each client gets renamed in Omada. Tokens are replaced with the resolved value (AI-first, then Fingerbank, then Omada).</p>
+
+                <label class="block text-[11px] font-medium text-ink-500 uppercase tracking-wide mb-1.5">Template</label>
+                <input id="naming-template" class="w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-base font-mono text-ink-900 px-4 py-3 rounded transition" placeholder="{name} - {os} - {type}">
+
+                <div class="flex items-center gap-1.5 mt-3 flex-wrap">
+                    <span class="text-[11px] text-ink-500 mr-1 uppercase tracking-wide">Quick presets:</span>
+                    <button class="preset-btn bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-mono px-2.5 py-1.5 rounded transition" data-tpl="{name}">AI Name</button>
+                    <button class="preset-btn bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-mono px-2.5 py-1.5 rounded transition" data-tpl="{name} - {type}">AI Name + Type</button>
+                    <button class="preset-btn bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-mono px-2.5 py-1.5 rounded transition" data-tpl="{name} - {os} - {type}">AI Name + OS + Type</button>
+                    <button class="preset-btn bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-mono px-2.5 py-1.5 rounded transition" data-tpl="{vdr} - {name}">Vendor + AI Name</button>
+                    <button class="preset-btn bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-[12px] font-mono px-2.5 py-1.5 rounded transition" data-tpl="{host} - {cat}">Hostname + Cat</button>
+                </div>
+
+                <div class="mt-5 grid grid-cols-2 gap-6">
+                    <div>
+                        <h3 class="text-[11px] font-medium text-ink-500 uppercase tracking-wide mb-2">Token Reference</h3>
+                        <table class="w-full text-[12px]">
+                            <tr><td class="font-mono text-brand-600 py-1">{name}</td><td class="text-ink-700 py-1">AI short_name → hostname → "Device"</td></tr>
+                            <tr><td class="font-mono text-brand-600 py-1">{os}</td><td class="text-ink-700 py-1">AI normalized_os → Omada osName → "Unknown"</td></tr>
+                            <tr><td class="font-mono text-brand-600 py-1">{type}</td><td class="text-ink-700 py-1">AI normalized_type → Omada deviceType → "Unknown"</td></tr>
+                            <tr><td class="font-mono text-brand-600 py-1">{vdr}</td><td class="text-ink-700 py-1">AI manufacturer → Omada vendor → "Unknown-NIC"</td></tr>
+                            <tr><td class="font-mono text-ink-500 py-1">{host}</td><td class="text-ink-700 py-1">DHCP hostname (raw)</td></tr>
+                            <tr><td class="font-mono text-ink-500 py-1">{cat}</td><td class="text-ink-700 py-1">AI type → Omada category → "Others"</td></tr>
+                            <tr><td class="font-mono text-ink-500 py-1">{mac}</td><td class="text-ink-700 py-1">MAC address (uppercase dash format)</td></tr>
+                            <tr><td class="font-mono text-ink-500 py-1">{ip}</td><td class="text-ink-700 py-1">IPv4 address</td></tr>
+                            <tr><td class="font-mono text-success-600 py-1">{notes}</td><td class="text-ink-700 py-1">Owner notes (raw text)</td></tr>
+                        </table>
+                    </div>
+                    <div>
+                        <h3 class="text-[11px] font-medium text-ink-500 uppercase tracking-wide mb-2">Live Preview</h3>
+                        <div id="policy-preview" class="space-y-1.5 text-[12px] text-ink-700">
+                            <div class="text-ink-500 italic">Loading clients...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end mt-5 pt-4 border-t border-ink-200">
+                    <button onclick="saveTemplate()" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-5 py-2 rounded transition">Save Policy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== VIEW: AI MODELS ==================== -->
+        <div id="view-ai-model" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <h2 class="text-lg font-medium text-ink-900 mb-1">AI Models</h2>
+                <p class="text-[13px] text-ink-600 mb-5">Gemini analyzes each unknown device using its MAC, DHCP hostname, vendor OUI, captured fingerprint, and any owner notes to produce structured identification.</p>
+
+                <label class="block text-[11px] font-medium text-ink-500 uppercase tracking-wide mb-1.5">Active Model</label>
+                <select id="gemini-model" class="w-full max-w-md bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-900 px-3 py-2 rounded transition">
+                    <option value="">Loading...</option>
+                </select>
+                <div class="text-[11px] text-ink-500 mt-1">Pro models reason more carefully but are slower; Flash models are quicker for batch scans.</div>
+
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mt-6">
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Devices analyzed</div>
+                        <div id="ai-stat-analyzed" class="text-xl font-medium text-ink-900 mt-1">—</div>
+                    </div>
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">High confidence</div>
+                        <div id="ai-stat-high" class="text-xl font-medium text-success-600 mt-1">—</div>
+                    </div>
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Low confidence (needs notes)</div>
+                        <div id="ai-stat-low" class="text-xl font-medium text-danger-500 mt-1">—</div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-ink-200">
+                    <button onclick="saveTemplate()" class="bg-white border border-ink-300 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-sm font-medium px-4 py-2 rounded transition">Save Model</button>
+                    <button onclick="scanUnidentified()" id="scan-btn-2" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-4 py-2 rounded transition">🧠 Scan Unidentified</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== VIEW: DHCP CAPTURE ==================== -->
+        <div id="view-dhcp" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <h2 class="text-lg font-medium text-ink-900 mb-1">DHCP Capture</h2>
+                <p class="text-[13px] text-ink-600 mb-5">Passive listener for TZSP-encapsulated DHCP traffic. Configure your gateway (e.g. MikroTik) to forward DHCP packets to UDP/37008 on this host.</p>
+
+                <div id="dhcp-detail-status" class="mb-5"></div>
+
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Listen port</div>
+                        <div id="dhcp-stat-port" class="text-xl font-medium font-mono text-ink-900 mt-1">—</div>
+                    </div>
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Source</div>
+                        <div id="dhcp-stat-source" class="text-xl font-medium font-mono text-ink-900 mt-1">—</div>
+                    </div>
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Packets received</div>
+                        <div id="dhcp-stat-pkts" class="text-xl font-medium text-ink-900 mt-1">—</div>
+                    </div>
+                    <div class="bg-ink-50 border border-ink-200 rounded p-3">
+                        <div class="text-[11px] text-ink-500 uppercase tracking-wide">Fingerprints stored</div>
+                        <div id="dhcp-stat-fp" class="text-xl font-medium text-success-600 mt-1">—</div>
+                    </div>
+                </div>
+
+                <h3 class="text-[11px] font-medium text-ink-500 uppercase tracking-wide mt-6 mb-2">Captured Fingerprints</h3>
+                <div class="overflow-x-auto border border-ink-200 rounded">
+                    <table class="w-full text-[12px]">
+                        <thead class="bg-ink-50 text-ink-600">
+                            <tr>
+                                <th class="px-3 py-2 text-left font-medium">MAC</th>
+                                <th class="px-3 py-2 text-left font-medium">Hostname</th>
+                                <th class="px-3 py-2 text-left font-medium">Option 55 (Param Request List)</th>
+                                <th class="px-3 py-2 text-left font-medium">Option 60 (Vendor Class)</th>
+                                <th class="px-3 py-2 text-left font-medium">Captured</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dhcp-fp-list"></tbody>
+                    </table>
+                </div>
+
+                <h3 class="text-[11px] font-medium text-ink-500 uppercase tracking-wide mt-6 mb-2">MikroTik Configuration</h3>
+                <pre class="bg-ink-50 border border-ink-200 rounded p-3 text-[11px] font-mono text-ink-900 overflow-x-auto">/tool sniffer set streaming-enabled=yes streaming-server=&lt;this-host&gt;:37008 \
+    filter-ip-protocol=udp filter-port=bootps,bootpc
+/tool sniffer start</pre>
+            </div>
+        </div>
+
+        <!-- ==================== VIEW: FINGERBANK ==================== -->
+        <div id="view-fingerbank" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <div class="flex items-start gap-4">
+                    <div class="dev-icon flex-shrink-0" style="width:44px;height:44px;background:#e6f4ef;color:#0e8669;">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    </div>
+                    <div class="flex-1">
+                        <div class="flex items-center justify-between mb-2">
+                            <h2 class="text-lg font-medium text-ink-900">Fingerbank Integration</h2>
+                            <span class="text-[11px] bg-success-50 text-success-600 border border-success-500/20 px-2 py-0.5 rounded font-medium">CONFIGURED</span>
+                        </div>
+                        <p class="text-[13px] text-ink-600 mb-4 max-w-2xl">
+                            Fingerbank classifies devices based on captured DHCP option 55 (parameter request list) and option 60 (vendor class). When you click the 🔍 icon on a device row, the captured fingerprint is sent to <code class="font-mono text-[12px] bg-ink-100 px-1.5 py-0.5 rounded">api.fingerbank.org</code> for a vendor/model match.
+                        </p>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
+                            <div><div class="text-ink-500">API endpoint</div><div class="font-mono text-ink-900">api.fingerbank.org/v2</div></div>
+                            <div><div class="text-ink-500">Lookups cached</div><div class="font-mono text-ink-900" id="fb-cache-count">—</div></div>
+                            <div><div class="text-ink-500">Used by</div><div class="font-mono text-ink-900">🔍 icon · AI prompts</div></div>
+                            <div><div class="text-ink-500">Override</div><div class="font-mono text-ink-900">FINGERBANK_API_KEY env</div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== VIEW: SETTINGS ==================== -->
+        <div id="view-settings" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <h2 class="text-lg font-medium text-ink-900 mb-1">Settings</h2>
+                <p class="text-[13px] text-ink-600 mb-5">Credentials and connection details stored in the app database. Saved values override the env-var defaults; clearing a field falls back to the env-var. No restart needed — changes apply immediately to subsequent API calls.</p>
+
+                <!-- Loading state shown until first GET resolves -->
+                <div id="settings-loading" class="py-12 text-center text-ink-500 text-[13px]">Loading current configuration…</div>
+
+                <form id="settings-form" class="hidden space-y-6">
+
+                    <!-- ===== Omada Connection ===== -->
+                    <section>
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-[13px] font-medium text-ink-900 uppercase tracking-wide">Omada Controller</h3>
+                            <button type="button" id="test-omada-btn" class="text-[12px] text-brand-700 hover:underline">Test connection</button>
+                        </div>
+                        <div class="grid grid-cols-1 gap-3">
+                            <div>
+                                <label class="block text-[11px] text-ink-500 uppercase tracking-wide mb-1">Controller URL <span class="source-badge" data-source-for="omada_url"></span></label>
+                                <input id="cfg-omada-url" type="text" class="cfg-input w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm font-mono text-ink-900 px-3 py-2 rounded transition" placeholder="https://omada.example.com">
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[11px] text-ink-500 uppercase tracking-wide mb-1">Client ID <span class="source-badge" data-source-for="omada_client_id"></span></label>
+                                    <input id="cfg-omada-client-id" type="text" class="cfg-input w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm font-mono text-ink-900 px-3 py-2 rounded transition" placeholder="Open API application client ID">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] text-ink-500 uppercase tracking-wide mb-1">Client Secret <span class="source-badge" data-source-for="omada_client_secret"></span></label>
+                                    <input id="cfg-omada-client-secret" type="text" class="cfg-input w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm font-mono text-ink-900 px-3 py-2 rounded transition" placeholder="••••••••">
+                                </div>
+                            </div>
+                        </div>
+                        <div id="omada-test-result" class="text-[12px] mt-2 hidden"></div>
+                    </section>
+
+                    <!-- ===== Fingerbank ===== -->
+                    <section class="border-t border-ink-200 pt-5">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-[13px] font-medium text-ink-900 uppercase tracking-wide">Fingerbank</h3>
+                        </div>
+                        <p class="text-[12px] text-ink-500 mb-2">Used by the 🔍 row icon and as input to AI prompts. Get a key at <a href="https://fingerbank.org" class="text-brand-700 hover:underline" target="_blank">fingerbank.org</a>.</p>
+                        <label class="block text-[11px] text-ink-500 uppercase tracking-wide mb-1">API Key <span class="source-badge" data-source-for="fingerbank_api_key"></span></label>
+                        <input id="cfg-fingerbank-key" type="text" class="cfg-input w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm font-mono text-ink-900 px-3 py-2 rounded transition" placeholder="••••••••">
+                    </section>
+
+                    <!-- ===== Gemini ===== -->
+                    <section class="border-t border-ink-200 pt-5">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-[13px] font-medium text-ink-900 uppercase tracking-wide">Gemini (Google AI)</h3>
+                            <button type="button" id="test-gemini-btn" class="text-[12px] text-brand-700 hover:underline">Test API key</button>
+                        </div>
+                        <p class="text-[12px] text-ink-500 mb-2">Used by the ✨ row icon (AI Analyze), the 💬 chat, and the Harmonize Names tool. Get a key at <a href="https://aistudio.google.com/app/apikey" class="text-brand-700 hover:underline" target="_blank">aistudio.google.com</a>.</p>
+                        <label class="block text-[11px] text-ink-500 uppercase tracking-wide mb-1">API Key <span class="source-badge" data-source-for="gemini_api_key"></span></label>
+                        <input id="cfg-gemini-key" type="text" class="cfg-input w-full bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm font-mono text-ink-900 px-3 py-2 rounded transition" placeholder="••••••••">
+                        <div id="gemini-test-result" class="text-[12px] mt-2 hidden"></div>
+                        <p class="text-[12px] text-ink-500 mt-3">Default model is set in <a href="#" data-target="ai-model" class="text-brand-700 hover:underline">AI Models</a>.</p>
+                    </section>
+
+                    <!-- ===== Save bar ===== -->
+                    <div class="border-t border-ink-200 pt-5 flex items-center gap-3">
+                        <button type="button" id="settings-save-btn" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-4 py-2 rounded transition">Save Settings</button>
+                        <button type="button" id="settings-reveal-btn" class="text-[12px] text-ink-500 hover:text-ink-900">Show full secrets</button>
+                        <span id="settings-save-status" class="text-[12px] text-ink-500"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<script>
+    let currentClients = [];
+    let currentFilter = 'all';
+    let currentSearch = '';
+    let pendingExpandMac = null;
+    let columnFilters = {};
+    let currentView = 'clients';
+
+    function esc(s) {
+        return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function renderResolvedField(label, resolved, omadaVal, aiVal, omadaLabel) {
+        const lbl = (label + ':').padEnd(14);
+        const r = resolved || 'Unknown';
+        const aiClean = (aiVal && aiVal !== 'Unknown' && aiVal !== 'Other') ? aiVal : null;
+        const oClean  = (omadaVal && omadaVal !== 'Unknown') ? omadaVal : null;
+        let tag = '';
+        if (aiClean && r === aiClean) { tag = `  ← AI`; if (oClean && oClean !== aiClean) tag += ` (Omada: ${esc(oClean)})`; }
+        else if (oClean && r === oClean) { tag = `  ← ${omadaLabel}`; }
+        return `${lbl}${esc(r)}${tag}`;
+    }
+
+    function renderMdnsSection(c) {
+        const m = c.mdns_data;
+        if (!m || (!(m.services || []).length && !(m.instance_names || []).length && !Object.keys(m.txt || {}).length)) {
+            return '';
+        }
+        const services = m.services || [];
+        const instances = m.instance_names || [];
+        const txt = m.txt || {};
+        const txtEntries = Object.entries(txt);
+        const captured = m.last_seen ? `Last seen: ${esc(m.last_seen)} · ${m.packet_count || 1} packet(s)` : '';
+        return `
+            <div class="bg-white border border-purple-500/20 rounded p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <h4 class="text-purple-600 text-xs font-semibold uppercase tracking-wide">🪪 mDNS / Bonjour</h4>
+                    <span class="text-[11px] text-ink-500">${captured}</span>
+                </div>
+                ${services.length ? `
+                    <div class="mb-3">
+                        <div class="text-[11px] text-ink-500 mb-1">Services announced (${services.length})</div>
+                        <div class="flex flex-wrap gap-1">
+                            ${services.map(s => `<code class="bg-purple-50 text-purple-700 px-2 py-0.5 rounded text-[11px] font-mono">${esc(s)}</code>`).join('')}
+                        </div>
+                    </div>` : ''}
+                ${instances.length ? `
+                    <div class="mb-3">
+                        <div class="text-[11px] text-ink-500 mb-1">Instance names</div>
+                        <div class="flex flex-wrap gap-1">
+                            ${instances.slice(0, 6).map(i => `<span class="bg-ink-50 text-ink-700 px-2 py-0.5 rounded text-[11px]">${esc(i)}</span>`).join('')}
+                            ${instances.length > 6 ? `<span class="text-[11px] text-ink-500 self-center">+${instances.length - 6} more</span>` : ''}
+                        </div>
+                    </div>` : ''}
+                ${txtEntries.length ? `
+                    <div>
+                        <div class="text-[11px] text-ink-500 mb-1">TXT records</div>
+                        <table class="w-full text-[12px]">
+                            <tbody>
+                                ${txtEntries.map(([k, v]) => `
+                                    <tr class="border-b border-ink-100 last:border-0">
+                                        <td class="py-1 pr-3 text-ink-500 font-mono w-24">${esc(k)}</td>
+                                        <td class="py-1 text-ink-900 font-mono break-all">${esc(v)}</td>
+                                    </tr>`).join('')}
+                            </tbody>
+                        </table>
+                    </div>` : ''}
+            </div>
+        `;
+    }
+
+    function renderJson(obj) {
+        if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) {
+            return '<p class="text-ink-500 italic text-[11px]">No data. Click 🔍 to query Fingerbank.</p>';
+        }
+        let html = '<div class="json-tree">';
+        for (const [key, val] of Object.entries(obj)) {
+            if (val !== null && typeof val === 'object') html += `<div><span class="json-key">${esc(key)}:</span><div class="json-nest">${renderJson(val)}</div></div>`;
+            else html += `<div><span class="json-key">${esc(key)}:</span><span class="json-val">${esc(val)}</span></div>`;
+        }
+        return html + '</div>';
+    }
+
+    function deviceIcon(c) {
+        const t = (c.resolved_type || c.deviceType || '').toLowerCase();
+        const map = { phone: '📱', tablet: '📱', pc: '💻', server: '🖥️', router: '🌐', camera: '📷', tv: '📺', console: '🎮', printer: '🖨️', speaker: '🔊', watch: '⌚', iot: '💡', vehicle: '🚗', appliance: '🔌' };
+        return map[t] || '•••';
+    }
+
+    function pill(text, variant = 'default', title = '') {
+        const styles = {
+            default: 'bg-ink-100 text-ink-700',
+            success: 'bg-success-50 text-success-600 border border-success-500/20',
+            warning: 'bg-warning-50 text-warning-600 border border-warning-500/20',
+            danger:  'bg-danger-50 text-danger-600 border border-danger-500/20',
+            info:    'bg-info-50 text-info-500 border border-info-500/20',
+            brand:   'bg-brand-50 text-brand-700 border border-brand-500/20',
+            purple:  'bg-purple-50 text-purple-700 border border-purple-500/20',
+        };
+        const cls = styles[variant] || styles.default;
+        return `<span class="${cls} text-[10px] font-medium px-1.5 py-0.5 rounded inline-block" ${title ? `title="${esc(title)}"` : ''}>${esc(text)}</span>`;
+    }
+
+    // ============================================================
+    // COLUMN REGISTRY — single source of truth for every column we
+    // can show. Each entry defines:
+    //   label   — header text
+    //   width   — fixed CSS width, or null for the flex/auto column
+    //   muted   — render cell in secondary color
+    //   mono    — render cell in monospace
+    //   alwaysOn— can't be hidden (checkbox disabled)
+    //   filter  — supports per-column search popover
+    //   cell(c) — returns HTML for the cell content
+    //   match(c, q) — returns true if client matches lowercase query q
+    //                 (only required if filter:true)
+    // Add new columns here and they automatically show up in the
+    // "Columns" picker and the filter switch.
+    // ============================================================
+    const COLUMN_REGISTRY = {
+        // ── Defaults ──
+        name: {
+            label: 'CLIENT NAME', width: '220px', alwaysOn: true, filter: true,
+            cell: c => esc(c.name || c.dhcp_hostname || '—'),
+            match: (c, q) => (c.name || c.dhcp_hostname || '').toLowerCase().includes(q),
+        },
+        hostname: {
+            label: 'HOSTNAME', width: '180px', muted: true, filter: true,
+            cell: c => esc(c.dhcp_hostname || '—'),
+            match: (c, q) => (c.dhcp_hostname || '').toLowerCase().includes(q),
+        },
+        mac: {
+            label: 'MAC', width: '140px', muted: true, mono: true, filter: true,
+            sortKey: c => (c.mac || '').toUpperCase(),
+            cell: c => esc(c.mac || '—'),
+            match: (c, q) => (c.mac || '').toLowerCase().includes(q),
+        },
+        ip: {
+            label: 'IP', width: '110px', muted: true, mono: true, filter: true,
+            // Sort by numeric octets so 192.168.0.9 sorts before 192.168.0.10
+            sortKey: c => {
+                const ip = c.ip || '';
+                const parts = ip.split('.');
+                if (parts.length !== 4) return [999, 999, 999, 999];
+                return parts.map(n => parseInt(n, 10) || 0);
+            },
+            cell: c => esc(c.ip || '—'),
+            match: (c, q) => (c.ip || '').toLowerCase().includes(q),
+        },
+        os: {
+            label: 'OS', width: '80px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.resolved_os || 'Unknown',
+            cell: c => esc(c.resolved_os || '—'),
+            match: (c, q) => (c.resolved_os || '').toLowerCase().includes(q),
+        },
+        type: {
+            label: 'TYPE', width: '80px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.resolved_type || 'Unknown',
+            cell: c => esc(c.resolved_type || '—'),
+            match: (c, q) => (c.resolved_type || '').toLowerCase().includes(q),
+        },
+        status: {
+            label: 'STATUS', width: '120px', filter: true,
+            groupable: true, groupKey: c => c.identified ? 'Identified' : 'Unknown',
+            cell: c => renderStatusCell(c),
+            match: (c, q) => (c.identified ? 'identified' : 'unknown').includes(q),
+        },
+        proposed: {
+            label: 'PROPOSED', width: null, filter: true,
+            cell: c => renderProposedCell(c),
+            match: (c, q) => (c.proposed_name || '').toLowerCase().includes(q),
+        },
+        // ── Extras: hidden by default, available via Columns picker ──
+        vendor: {
+            label: 'VENDOR', width: '160px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.oui_vendor || c.vendor || c.manufacturer || 'Unknown',
+            cell: c => esc(c.oui_vendor || c.vendor || c.manufacturer || '—'),
+            match: (c, q) => (c.oui_vendor || c.vendor || c.manufacturer || '').toLowerCase().includes(q),
+        },
+        category: {
+            label: 'CATEGORY', width: '120px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.deviceCategory || 'Others',
+            cell: c => esc(c.deviceCategory || '—'),
+            match: (c, q) => (c.deviceCategory || '').toLowerCase().includes(q),
+        },
+        ssid: {
+            label: 'SSID', width: '120px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.ssid || '(wired/none)',
+            cell: c => esc(c.ssid || '—'),
+            match: (c, q) => (c.ssid || '').toLowerCase().includes(q),
+        },
+        ap: {
+            label: 'AP / SWITCH', width: '140px', muted: true, filter: true,
+            groupable: true, groupKey: c => c.apName || c.switchName || '(unattached)',
+            cell: c => esc(c.apName || c.switchName || '—'),
+            match: (c, q) => (c.apName || c.switchName || '').toLowerCase().includes(q),
+        },
+        connection: {
+            label: 'CONNECTION', width: '110px', muted: true,
+            groupable: true, groupKey: c => c.wireless ? 'Wireless' : 'Wired',
+            cell: c => c.wireless ? 'Wireless' : 'Wired',
+        },
+        dhcp_fp: {
+            label: 'DHCP FP', width: '160px', muted: true, mono: true, filter: true,
+            cell: c => esc(c.dhcp_fingerprint || '—'),
+            match: (c, q) => (c.dhcp_fingerprint || '').toLowerCase().includes(q),
+        },
+        dhcp_vendor: {
+            label: 'DHCP VENDOR', width: '180px', muted: true, mono: true, filter: true,
+            cell: c => esc(c.dhcp_vendor_class || '—'),
+            match: (c, q) => (c.dhcp_vendor_class || '').toLowerCase().includes(q),
+        },
+        mdns_services: {
+            label: 'MDNS', width: '160px', muted: true, filter: true,
+            cell: c => {
+                const svc = (c.mdns_data && c.mdns_data.services) || [];
+                if (!svc.length) return '—';
+                return svc.length <= 2 ? esc(svc.join(', ')) : `${esc(svc[0])} <span class="muted">+${svc.length - 1}</span>`;
+            },
+            match: (c, q) => {
+                const svc = (c.mdns_data && c.mdns_data.services) || [];
+                return svc.join(' ').toLowerCase().includes(q);
+            },
+        },
+        ai_confidence: {
+            label: 'AI CONF', width: '100px',
+            groupable: true,
+            groupKey: c => {
+                const conf = c.ai_data && c.ai_data.confidence;
+                if (!conf) return '(not analyzed)';
+                return 'AI: ' + conf;
+            },
+            cell: c => {
+                const conf = c.ai_data && c.ai_data.confidence;
+                if (!conf) return '<span class="muted">—</span>';
+                const cls = { high: 'on-ai-h', medium: 'on-ai-m', low: 'on-ai-l' }[conf] || '';
+                const arrow = { high: '▲', medium: '▶', low: '▼' }[conf] || '';
+                return `<span class="signal-glyph ${cls}" style="margin-left:0">${arrow}</span> ${esc(conf)}`;
+            },
+        },
+        ai_model: {
+            label: 'AI MODEL', width: '180px', muted: true, filter: true,
+            cell: c => {
+                const a = c.ai_data || {};
+                const parts = [a.manufacturer, a.model].filter(Boolean);
+                return esc(parts.join(' ') || '—');
+            },
+            match: (c, q) => {
+                const a = c.ai_data || {};
+                return ((a.manufacturer || '') + ' ' + (a.model || '')).toLowerCase().includes(q);
+            },
+        },
+        ai_description: {
+            label: 'AI DESCRIPTION', width: '320px', filter: true,
+            // Progressive fallback so this column does something useful for
+            // every device, even ones not yet analyzed:
+            //  1. brief_description (the new ≤10-word field)
+            //  2. truncated summary (older analyses pre-brief_description)
+            //  3. composed "{manufacturer} {product_type}" (partial data)
+            //  4. em-dash + hint that analysis hasn't run
+            cell: c => {
+                const a = c.ai_data || {};
+                if (a.brief_description) return esc(a.brief_description);
+                if (a.summary) {
+                    const words = a.summary.trim().split(/\s+/);
+                    const truncated = words.slice(0, 12).join(' ');
+                    const suffix = words.length > 12 ? '…' : '';
+                    return esc(truncated + suffix);
+                }
+                const composed = [a.manufacturer, a.product_type].filter(Boolean).join(' ');
+                if (composed) return esc(composed);
+                return '<span class="muted" title="Click the ✨ icon to run AI analysis">— not analyzed</span>';
+            },
+            match: (c, q) => {
+                const a = c.ai_data || {};
+                const haystack = [a.brief_description, a.summary, a.manufacturer,
+                                  a.product_type, a.suggested_label, a.reasoning]
+                                 .filter(Boolean).join(' ').toLowerCase();
+                return haystack.includes(q);
+            },
+        },
+        fb_device: {
+            label: 'FINGERBANK', width: '180px', muted: true, filter: true,
+            cell: c => {
+                const fb = c.fb_data && c.fb_data.device;
+                return esc((fb && fb.name) || '—');
+            },
+            match: (c, q) => {
+                const fb = c.fb_data && c.fb_data.device;
+                return ((fb && fb.name) || '').toLowerCase().includes(q);
+            },
+        },
+        notes: {
+            label: 'NOTES', width: '200px', muted: true, filter: true,
+            cell: c => {
+                const n = c.notes || '';
+                if (!n) return '—';
+                return esc(n.length > 60 ? n.slice(0, 60) + '…' : n);
+            },
+            match: (c, q) => (c.notes || '').toLowerCase().includes(q),
+        },
+        first_seen: {
+            label: 'FIRST SEEN', width: '130px', muted: true,
+            cell: c => esc(formatDateShort(c.first_seen)),
+        },
+        last_seen: {
+            label: 'LAST SEEN', width: '130px', muted: true,
+            cell: c => esc(formatDateShort(c.last_seen)),
+        },
+        last_synced: {
+            label: 'LAST SYNCED', width: '180px', muted: true,
+            cell: c => esc(c.last_synced_name || '—'),
+        },
+        auto_sync: {
+            label: 'AUTO', width: '70px',
+            cell: c => c.auto_sync
+                ? '<span class="text-success-600">✓</span>'
+                : '<span class="muted">—</span>',
+        },
+    };
+
+    const DEFAULT_COLUMNS = ['name', 'hostname', 'mac', 'ip', 'os', 'type', 'status', 'proposed'];
+    const ALL_COLUMN_KEYS = Object.keys(COLUMN_REGISTRY);
+    const COLUMNS_STORAGE_KEY = 'omada-table-columns-v1';
+    const GROUPBY_STORAGE_KEY = 'omada-table-groupby-v1';
+    const COLLAPSED_GROUPS_KEY = 'omada-table-collapsed-groups-v1';
+    const SORT_STORAGE_KEY = 'omada-table-sort-v1';
+
+    let visibleColumns = loadVisibleColumns();
+    let currentGroupBy = loadGroupBy();  // null = no grouping, else key like 'type'
+    let collapsedGroups = loadCollapsedGroups();  // Set of group labels currently collapsed
+    let currentSort = loadSort();  // { key: 'name', direction: 'asc' } | { key: null, direction: null }
+
+    function loadSort() {
+        try {
+            const stored = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) || 'null');
+            if (stored && typeof stored.key === 'string' &&
+                ['asc', 'desc'].includes(stored.direction) &&
+                stored.key in COLUMN_REGISTRY) {
+                return stored;
+            }
+        } catch (e) { /* ignore */ }
+        return { key: null, direction: null };
+    }
+
+    function saveSort() {
+        try {
+            if (currentSort.key) localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(currentSort));
+            else localStorage.removeItem(SORT_STORAGE_KEY);
+        } catch (e) { /* ignore */ }
+    }
+
+    function loadVisibleColumns() {
+        try {
+            const stored = JSON.parse(localStorage.getItem(COLUMNS_STORAGE_KEY) || 'null');
+            if (Array.isArray(stored) && stored.length > 0) {
+                const valid = stored.filter(k => k in COLUMN_REGISTRY);
+                for (const k of ALL_COLUMN_KEYS) {
+                    if (COLUMN_REGISTRY[k].alwaysOn && !valid.includes(k)) {
+                        valid.unshift(k);
+                    }
+                }
+                if (valid.length) return valid;
+            }
+        } catch (e) { /* ignore corrupt storage */ }
+        return [...DEFAULT_COLUMNS];
+    }
+
+    function saveVisibleColumns() {
+        try { localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumns)); }
+        catch (e) { /* storage full or disabled — soldier on */ }
+    }
+
+    function loadGroupBy() {
+        try {
+            const v = localStorage.getItem(GROUPBY_STORAGE_KEY);
+            if (v && v in COLUMN_REGISTRY && COLUMN_REGISTRY[v].groupable) return v;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    function saveGroupBy() {
+        try {
+            if (currentGroupBy) localStorage.setItem(GROUPBY_STORAGE_KEY, currentGroupBy);
+            else localStorage.removeItem(GROUPBY_STORAGE_KEY);
+        } catch (e) { /* ignore */ }
+    }
+
+    function loadCollapsedGroups() {
+        try {
+            const stored = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || '[]');
+            if (Array.isArray(stored)) return new Set(stored);
+        } catch (e) { /* ignore */ }
+        return new Set();
+    }
+
+    function saveCollapsedGroups() {
+        try { localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...collapsedGroups])); }
+        catch (e) { /* ignore */ }
+    }
+
+    // Group an already-filtered client list by the currentGroupBy column.
+    // Returns an array of {label, items} preserving sorted group order.
+    function groupClients(clients) {
+        if (!currentGroupBy) return null;
+        const spec = COLUMN_REGISTRY[currentGroupBy];
+        if (!spec || !spec.groupable || typeof spec.groupKey !== 'function') return null;
+        const groups = new Map();
+        for (const c of clients) {
+            const key = String(spec.groupKey(c));
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(c);
+        }
+        // Sort group labels alphabetically, but float unknown-ish groups to the bottom
+        const labels = [...groups.keys()].sort((a, b) => {
+            const ax = /^(unknown|others?|n\/a|\()/i.test(a);
+            const bx = /^(unknown|others?|n\/a|\()/i.test(b);
+            if (ax !== bx) return ax ? 1 : -1;
+            return a.localeCompare(b);
+        });
+        return labels.map(label => ({ label, items: groups.get(label) }));
+    }
+
+    // ============================================================
+    // SORTING — applied AFTER filter and BEFORE grouping. Each column can
+    // define an optional sortKey(c) extractor returning a comparable
+    // value (string, number, or array of either for compound sorts like
+    // IP octets). When sortKey is absent, falls back to lowercased cell
+    // text with HTML stripped — works for most simple columns.
+    // ============================================================
+    function getSortValue(c, spec) {
+        if (typeof spec.sortKey === 'function') return spec.sortKey(c);
+        // Fall back: strip HTML from the rendered cell, lowercase it
+        let s = '';
+        try { s = spec.cell(c); } catch (_) { s = ''; }
+        return String(s).replace(/<[^>]+>/g, '').trim().toLowerCase();
+    }
+
+    function compareSortValues(a, b) {
+        // Handle arrays element-wise (used by IP, etc.)
+        if (Array.isArray(a) && Array.isArray(b)) {
+            const len = Math.max(a.length, b.length);
+            for (let i = 0; i < len; i++) {
+                const ai = a[i] ?? '';
+                const bi = b[i] ?? '';
+                const c = compareSortValues(ai, bi);
+                if (c !== 0) return c;
+            }
+            return 0;
+        }
+        // Numeric vs numeric
+        if (typeof a === 'number' && typeof b === 'number') {
+            return a - b;
+        }
+        // Fall back to string compare (handles dates as ISO strings too)
+        const sa = String(a), sb = String(b);
+        return sa.localeCompare(sb, undefined, { numeric: true });
+    }
+
+    function isEmptyValue(v) {
+        if (v === null || v === undefined) return true;
+        if (Array.isArray(v)) return v.every(x => x === '' || x === null || x === undefined || x === 999);
+        const s = String(v).trim();
+        return s === '' || s === '—' || s === '?';
+    }
+
+    function sortClients(clients) {
+        if (!currentSort.key) return clients;
+        const spec = COLUMN_REGISTRY[currentSort.key];
+        if (!spec) return clients;
+        const dir = currentSort.direction === 'desc' ? -1 : 1;
+        return [...clients].sort((a, b) => {
+            const va = getSortValue(a, spec);
+            const vb = getSortValue(b, spec);
+            // Empties always sort last, regardless of asc/desc.
+            // (Listing "—" at the top of a desc list is confusing UX.)
+            const aEmpty = isEmptyValue(va);
+            const bEmpty = isEmptyValue(vb);
+            if (aEmpty && !bEmpty) return 1;
+            if (bEmpty && !aEmpty) return -1;
+            if (aEmpty && bEmpty) return 0;
+            return dir * compareSortValues(va, vb);
+        });
+    }
+
+    // Cycle a column's sort: unsorted → asc → desc → unsorted.
+    function cycleSort(key) {
+        if (!(key in COLUMN_REGISTRY)) return;
+        if (currentSort.key !== key) {
+            currentSort = { key, direction: 'asc' };
+        } else if (currentSort.direction === 'asc') {
+            currentSort = { key, direction: 'desc' };
+        } else {
+            currentSort = { key: null, direction: null };
+        }
+        saveSort();
+        buildTableStructure();
+        setupColumnResize();
+        setupColumnFilters();
+        renderTable();
+    }
+
+    function formatDateShort(iso) {
+        if (!iso) return '—';
+        // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ — strip the time for table density
+        const m = String(iso).match(/^(\d{4}-\d{2}-\d{2})/);
+        return m ? m[1] : iso;
+    }
+
+    function renderStatusCell(c) {
+        // Primary text: just IDENTIFIED / UNKNOWN like Omada's CONNECTED. No background pill.
+        const main = c.identified
+            ? `<span class="text-success-600 font-medium">IDENTIFIED</span>`
+            : `<span class="text-warning-600 font-medium">UNKNOWN</span>`;
+        // Compact secondary signals as single-glyph inline icons — colored when present,
+        // ghosted/hidden when absent. Each glyph has a tooltip explaining what it means.
+        const glyphs = [];
+        if (c.notes) {
+            glyphs.push(`<span class="signal-glyph on-notes" title="Owner notes saved">📝</span>`);
+        }
+        if (c.dhcp_fingerprint) {
+            glyphs.push(`<span class="signal-glyph on-fp" title="DHCP fingerprint captured">⊡</span>`);
+        }
+        if (c.mdns_data && (c.mdns_data.services || []).length) {
+            const services = (c.mdns_data.services || []).join(', ');
+            glyphs.push(`<span class="signal-glyph on-mdns" title="mDNS services: ${esc(services)}">🪪</span>`);
+        }
+        if (c.ai_data && c.ai_data.suggested_label) {
+            const conf = c.ai_data.confidence || 'low';
+            const arrow = { high: '▲', medium: '▶', low: '▼' }[conf] || '·';
+            const cls = { high: 'on-ai-h', medium: 'on-ai-m', low: 'on-ai-l' }[conf] || '';
+            glyphs.push(`<span class="signal-glyph ${cls}" title="Gemini ${conf} confidence">${arrow}</span>`);
+        }
+        if (c.is_new) {
+            glyphs.push(`<span class="signal-glyph on-fp" title="New device (first seen recently)">●</span>`);
+        }
+        return main + glyphs.join('');
+    }
+
+    function renderProposedCell(c) {
+        // When the proposed name already equals what's on Omada, the row needs
+        // no action — show "✓ in sync" in muted color rather than redisplaying
+        // the same name with a stale-looking arrow. Mismatch shows ▲ + name.
+        const currentName = c.name || '';
+        const proposed = (c.proposed_name || '').substring(0, 128);
+        if (currentName === proposed && proposed) {
+            return `<span class="in-sync" title="Current Omada name matches proposed">✓ in sync</span>`;
+        }
+        if (!proposed) {
+            return `<span class="muted">—</span>`;
+        }
+        return `<span class="mismatch">▲</span> <span class="mismatch">${esc(proposed)}</span>`;
+    }
+
+    function filterClients(clients) {
+        let out = clients;
+        switch (currentFilter) {
+            case 'unidentified': out = out.filter(c => !c.identified); break;
+            case 'new':          out = out.filter(c => c.is_new); break;
+            case 'notes':        out = out.filter(c => c.notes); break;
+            case 'ai':           out = out.filter(c => c.ai_data && c.ai_data.suggested_label); break;
+            case 'fingerprint':  out = out.filter(c => c.dhcp_fingerprint); break;
+        }
+        if (currentSearch) {
+            const q = currentSearch.toLowerCase();
+            out = out.filter(c =>
+                (c.mac || '').toLowerCase().includes(q) ||
+                (c.ip || '').toLowerCase().includes(q) ||
+                (c.host_name_resolved || '').toLowerCase().includes(q) ||
+                (c.name || '').toLowerCase().includes(q) ||
+                (c.proposed_name || '').toLowerCase().includes(q)
+            );
+        }
+        // Apply per-column filters — delegate to each column's match function
+        // from the registry. Missing match function = column not filterable, skip.
+        for (const [col, val] of Object.entries(columnFilters)) {
+            if (!val) continue;
+            const spec = COLUMN_REGISTRY[col];
+            if (!spec || typeof spec.match !== 'function') continue;
+            const q = val.toLowerCase();
+            out = out.filter(c => spec.match(c, q));
+        }
+        return out;
+    }
+
+    function updateStats() {
+        const total = currentClients.length;
+        const identified = currentClients.filter(c => c.identified).length;
+        const unidentified = total - identified;
+        const isNew = currentClients.filter(c => c.is_new).length;
+        const withFp = currentClients.filter(c => c.dhcp_fingerprint).length;
+        const withNotes = currentClients.filter(c => c.notes).length;
+        const aiCount = currentClients.filter(c => c.ai_data && c.ai_data.suggested_label).length;
+        const fbCount = currentClients.filter(c => c.fb_data && Object.keys(c.fb_data).length > 0).length;
+        const aiHigh = currentClients.filter(c => c.ai_data && c.ai_data.confidence === 'high').length;
+        const aiLow  = currentClients.filter(c => c.ai_data && c.ai_data.confidence === 'low').length;
+
+        document.getElementById('stat-total').textContent = total;
+        document.getElementById('stat-identified').textContent = identified;
+        document.getElementById('stat-unidentified').textContent = unidentified;
+        document.getElementById('stat-new').textContent = isNew;
+        document.getElementById('stat-fp').textContent = withFp;
+        document.getElementById('stat-notes').textContent = withNotes;
+        const fb = document.getElementById('fb-cache-count'); if (fb) fb.textContent = fbCount;
+        const aiAnalyzed = document.getElementById('ai-stat-analyzed'); if (aiAnalyzed) aiAnalyzed.textContent = aiCount;
+        const aiH = document.getElementById('ai-stat-high'); if (aiH) aiH.textContent = aiHigh;
+        const aiL = document.getElementById('ai-stat-low'); if (aiL) aiL.textContent = aiLow;
+
+        const counts = { all: total, unidentified, new: isNew, notes: withNotes, ai: aiCount, fingerprint: withFp };
+        document.querySelectorAll('.filter-count').forEach(el => { el.textContent = counts[el.dataset.for] ?? 0; });
+    }
+
+    function updatePolicyPreview() {
+        const preview = document.getElementById('policy-preview');
+        if (!preview) return;
+        if (currentClients.length === 0) {
+            preview.innerHTML = '<div class="text-ink-500 italic">No clients loaded yet.</div>';
+            return;
+        }
+        const samples = currentClients.slice(0, 6);
+        preview.innerHTML = samples.map(c => `
+            <div class="grid grid-cols-2 gap-2 py-1 border-b border-ink-100 last:border-0">
+                <div class="font-mono text-[11px] text-ink-500 truncate">${esc(c.mac)}</div>
+                <div class="text-brand-700 font-medium truncate">${esc((c.proposed_name || '').substring(0, 64))}</div>
+            </div>`).join('');
+    }
+
+    // Build the table header + colgroup from visibleColumns. Called on initial
+    // load and whenever the column set changes.
+    function buildTableStructure() {
+        const colgroup = document.getElementById('client-colgroup');
+        const theadRow = document.getElementById('client-thead-row');
+        if (!colgroup || !theadRow) return;
+
+        // colgroup: leading checkbox + icon, then one col per visible column,
+        // trailing action column.
+        let cg = '<col style="width:36px"><col style="width:32px">';
+        for (const key of visibleColumns) {
+            const spec = COLUMN_REGISTRY[key];
+            if (!spec) continue;
+            cg += spec.width ? `<col style="width:${spec.width}">` : '<col>';
+        }
+        cg += '<col style="width:130px">';
+        colgroup.innerHTML = cg;
+
+        // Header row: checkbox, icon spacer, columns, ACTION
+        const filterSvg = `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>`;
+        let th = `
+            <th class="text-center"><input type="checkbox" id="select-all" class="w-4 h-4 accent-brand-500" disabled title="Bulk select (not implemented)"></th>
+            <th></th>
+        `;
+        for (const key of visibleColumns) {
+            const spec = COLUMN_REGISTRY[key];
+            if (!spec) continue;
+            const filterIcon = spec.filter
+                ? `<span class="col-filter-trigger" data-col="${key}" title="Filter ${esc(spec.label)}">${filterSvg}</span>`
+                : '';
+            // Sort caret: active when this column is the current sort key
+            let sortCaret = '';
+            if (currentSort.key === key) {
+                const arrow = currentSort.direction === 'asc' ? '▲' : '▼';
+                sortCaret = `<span class="sort-caret active" title="${currentSort.direction === 'asc' ? 'Ascending' : 'Descending'} — click to ${currentSort.direction === 'asc' ? 'reverse' : 'clear'}">${arrow}</span>`;
+            } else {
+                sortCaret = `<span class="sort-caret" title="Sort by ${esc(spec.label)}">⇅</span>`;
+            }
+            th += `
+                <th data-col="${key}" class="col-sortable">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="col-header-label" data-sort-key="${esc(key)}">${esc(spec.label)} ${sortCaret}</span>
+                        ${filterIcon}
+                    </div>
+                </th>`;
+        }
+        th += '<th class="text-center">ACTION</th>';
+        theadRow.innerHTML = th;
+
+        // Wire up sort clicks on header labels (separate from the filter icon,
+        // so clicking the funnel never triggers a sort change).
+        theadRow.querySelectorAll('.col-header-label').forEach(el => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                cycleSort(el.dataset.sortKey);
+            });
+        });
+    }
+
+    function renderTable() {
+        // 1. Filter, 2. Sort, 3. Group, 4. Render
+        const filtered = sortClients(filterClients(currentClients));
+        const list = document.getElementById('client-list');
+        list.innerHTML = '';
+
+        const totalColspan = visibleColumns.length + 3;  // 2 leading + N + 1 action
+
+        document.getElementById('filter-count').textContent = `Showing ${filtered.length} of ${currentClients.length}`;
+        document.querySelectorAll('.filter-pill').forEach(t => t.classList.toggle('active', t.dataset.filter === currentFilter));
+        document.querySelectorAll('.col-filter-trigger').forEach(t => t.classList.toggle('has-value', !!columnFilters[t.dataset.col]));
+        updateGroupByButtonLabel();
+
+        if (filtered.length === 0) {
+            list.innerHTML = `<tr><td colspan="${totalColspan}" class="px-6 py-16 text-center text-ink-500 text-sm">No devices match this filter.</td></tr>`;
+            return;
+        }
+
+        const groups = groupClients(filtered);
+        if (!groups) {
+            // Flat: render each filtered client in order
+            filtered.forEach((c, idx) => {
+                list.insertAdjacentHTML('beforeend',
+                    renderClientRow(c, idx, totalColspan, null, false));
+            });
+        } else {
+            // Grouped: emit a header row before each group's client rows
+            let idx = 0;
+            for (const group of groups) {
+                const collapsed = collapsedGroups.has(group.label);
+                const chevron = collapsed ? '▸' : '▾';
+                list.insertAdjacentHTML('beforeend', `
+                    <tr class="group-header" data-group="${esc(group.label)}">
+                        <td colspan="${totalColspan}">
+                            <span class="group-chevron">${chevron}</span>
+                            <span class="group-label">${esc(group.label)}</span>
+                            <span class="group-count">${group.items.length} ${group.items.length === 1 ? 'device' : 'devices'}</span>
+                        </td>
+                    </tr>
+                `);
+                for (const c of group.items) {
+                    list.insertAdjacentHTML('beforeend',
+                        renderClientRow(c, idx, totalColspan, group.label, collapsed));
+                    idx++;
+                }
+            }
+        }
+
+        attachRowEventHandlers(list);
+
+        if (pendingExpandMac) {
+            // Find the index in the rendered list by scanning for the MAC
+            const macAttr = pendingExpandMac;
+            const rows = list.querySelectorAll('tr.detail-pane');
+            for (const r of rows) {
+                if (r.dataset.mac === macAttr) {
+                    document.querySelectorAll('.detail-pane').forEach(x => x.classList.remove('expanded'));
+                    r.classList.add('expanded');
+                    break;
+                }
+            }
+            pendingExpandMac = null;
+        }
+    }
+
+    // Produce the HTML for one client row plus its detail-pane row.
+    // When `hidden` is true (row sits inside a collapsed group), the
+    // row-hidden class suppresses display until the group is expanded.
+    function renderClientRow(c, idx, totalColspan, groupLabel, hidden) {
+        const currentName = c.name || '';
+        const proposed = (c.proposed_name || '').substring(0, 128);
+        const isDiff = currentName !== proposed;
+        const rowId = `row-${idx}`;
+        const macAttr = esc(c.mac);
+        const hiddenCls = hidden ? 'row-hidden' : '';
+        const groupAttr = groupLabel ? ` data-group="${esc(groupLabel)}"` : '';
+
+        let cells = `
+            <td class="text-center"><input type="checkbox" data-mac="${macAttr}" ${c.auto_sync ? 'checked' : ''} class="auto-cb w-4 h-4 accent-brand-500"></td>
+            <td class="cursor-pointer toggle-row" data-row="${rowId}"><div class="dev-icon">${deviceIcon(c)}</div></td>
+        `;
+        for (const key of visibleColumns) {
+            const spec = COLUMN_REGISTRY[key];
+            if (!spec) continue;
+            const cls = ['cursor-pointer', 'toggle-row'];
+            if (spec.muted) cls.push('muted');
+            if (spec.mono) cls.push('font-mono');
+            cells += `<td class="${cls.join(' ')}" data-row="${rowId}">${spec.cell(c)}</td>`;
+        }
+        cells += `
+            <td class="text-center whitespace-nowrap">
+                <div class="inline-flex items-center gap-0.5">
+                    <button data-mac="${macAttr}" class="int-btn action-icon text-ink-600 hover:text-brand-700" title="Fingerbank lookup">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    </button>
+                    <button data-mac="${macAttr}" class="ai-btn action-icon text-purple-600 hover:text-purple-700" title="Ask Gemini">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                    </button>
+                    ${isDiff && !c.auto_sync ? `<button data-mac="${macAttr}" data-name="${esc(proposed)}" data-idx="${idx}" class="push-btn action-icon text-brand-600 hover:text-brand-700" title="Push name to Omada">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+                    </button>` : ''}
+                </div>
+            </td>
+        `;
+
+        return `
+            <tr class="${hiddenCls}"${groupAttr}>${cells}</tr>
+            <tr id="${rowId}" class="detail-pane ${hiddenCls}" data-mac="${macAttr}"${groupAttr}>
+                <td colspan="${totalColspan}" class="allow-wrap">
+                    <div class="space-y-4">
+                        <div class="bg-white border border-success-500/20 rounded p-4">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="text-success-600 text-xs font-semibold uppercase tracking-wide">📝 Owner's Notes</h4>
+                                <div class="text-[11px] text-ink-500">First seen: ${esc(c.first_seen || '—')} · Last seen: ${esc(c.last_seen || '—')}</div>
+                            </div>
+                            <textarea data-mac="${macAttr}" class="notes-input w-full bg-ink-50 border border-ink-200 focus:border-success-500 focus:bg-white focus:outline-none text-sm text-ink-900 p-2.5 rounded resize-y" rows="2" placeholder="What is this device? Anything Gemini should know?">${esc(c.notes || '')}</textarea>
+                            <div class="flex justify-end mt-2"><button data-mac="${macAttr}" class="save-notes-btn bg-success-500 hover:bg-success-600 text-white px-3 py-1 rounded text-xs font-medium transition">Save Notes</button></div>
+                        </div>
+                        <div class="bg-white border border-info-500/20 rounded p-4">
+                            <h4 class="text-info-500 text-xs font-semibold uppercase tracking-wide mb-3">📡 DHCP Fingerprint</h4>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="text-[11px] text-ink-500 mb-1 block">Option 55 — Parameter Request List</label>
+                                    <input data-mac="${macAttr}" data-field="dhcp_fingerprint" type="text" class="dhcp-input w-full bg-ink-50 border border-ink-200 focus:border-info-500 focus:bg-white focus:outline-none text-sm font-mono text-info-500 p-2 rounded transition" value="${esc(c.dhcp_fingerprint || '')}" placeholder="e.g. 1,3,6,15,28,42,121">
+                                </div>
+                                <div>
+                                    <label class="text-[11px] text-ink-500 mb-1 block">Option 60 — Vendor Class</label>
+                                    <input data-mac="${macAttr}" data-field="dhcp_vendor_class" type="text" class="dhcp-input w-full bg-ink-50 border border-ink-200 focus:border-info-500 focus:bg-white focus:outline-none text-sm font-mono text-info-500 p-2 rounded transition" value="${esc(c.dhcp_vendor_class || '')}" placeholder="e.g. dhcpcd-9.4.1:Linux:armv8l">
+                                </div>
+                            </div>
+                            <div class="flex justify-between items-center mt-2">
+                                <div class="text-[11px] text-ink-500">${c.dhcp_captured_at ? `Captured: ${esc(c.dhcp_captured_at)}` : 'Not yet captured · paste manually or wait for next DHCP renewal'}</div>
+                                <button data-mac="${macAttr}" class="save-dhcp-btn bg-info-500 hover:bg-info-600 text-white px-3 py-1 rounded text-xs font-medium transition">Save Fingerprint</button>
+                            </div>
+                        </div>
+                        ${renderMdnsSection(c)}
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="bg-white border border-ink-200 rounded p-4 max-h-[380px] overflow-y-auto">
+                                <h4 class="text-ink-700 text-xs font-semibold uppercase tracking-wide mb-3">Fingerbank Tree</h4>
+                                ${renderJson(c.fb_data)}
+                            </div>
+                            <div class="bg-white border border-ink-200 rounded p-4">
+                                <h4 class="text-ink-700 text-xs font-semibold uppercase tracking-wide mb-3">Device Context</h4>
+<pre class="text-[11px] text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">DHCP NAME:    ${esc(c.host_name_resolved)}
+${renderResolvedField('NAME', c.resolved_name, c.host_name_resolved, c.ai_data && c.ai_data.short_name, 'hostname')}
+${renderResolvedField('OS',   c.resolved_os,   c.osName || c.os,        c.ai_data && c.ai_data.normalized_os,   'Omada')}
+${renderResolvedField('TYPE', c.resolved_type, c.deviceType,            c.ai_data && c.ai_data.normalized_type, 'Omada')}
+VENDOR:       ${esc(c.oui_vendor || 'Unknown')}${c.ai_data && c.ai_data.manufacturer ? `  ← AI: ${esc(c.ai_data.manufacturer)}` : ''}
+CATEGORY:     ${esc(c.deviceCategory || 'Others')}
+DHCP FP:      ${c.dhcp_fingerprint ? esc(c.dhcp_fingerprint) : '(none captured)'}
+VENDOR CLASS: ${c.dhcp_vendor_class ? esc(c.dhcp_vendor_class) : '—'}
+SYNC MODE:    ${esc(c.auto_sync ? 'AUTOMATIC' : 'MANUAL')}
+LAST SYNCED:  ${esc(c.last_synced_name || '—')}
+CURRENT:      ${esc(currentName || '—')}
+PROPOSED:     ${esc(proposed)}</pre>
+                            </div>
+                        </div>
+                        <div class="bg-white border border-purple-500/20 rounded p-4">
+                            <h4 class="text-purple-700 text-xs font-semibold uppercase tracking-wide mb-3">🧠 AI Analysis (Gemini)</h4>
+                            ${renderAIBlock(c.ai_data, c.ai_analyzed_at, c.mac)}
+                        </div>
+                        <div class="bg-white border border-ink-200 rounded p-4">
+                            <h4 class="text-ink-700 text-xs font-semibold uppercase tracking-wide mb-3">curl Equivalents</h4>
+                            ${renderCurlBlock(c.curl)}
+                        </div>
+                    </div>
+                </td>
+            </tr>`;
+    }
+
+    // Attach event handlers to all the rows (and group headers) currently in the DOM.
+    // Called once at the end of renderTable rather than per-row to keep the
+    // listener count manageable.
+    function attachRowEventHandlers(list) {
+        list.querySelectorAll('.auto-cb').forEach(cb => cb.addEventListener('change', e => toggleAuto(e.target.dataset.mac, e.target.checked)));
+        list.querySelectorAll('.toggle-row').forEach(td => td.addEventListener('click', e => toggleRow(e.currentTarget.dataset.row)));
+        list.querySelectorAll('.int-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); refreshFB(e.currentTarget.dataset.mac); }));
+        list.querySelectorAll('.ai-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); runAI(e.currentTarget.dataset.mac, e.currentTarget); }));
+        list.querySelectorAll('.push-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; manualPush(t.dataset.mac, t.dataset.name, t); }));
+        list.querySelectorAll('.push-ai-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; manualPush(t.dataset.mac, t.dataset.name, t); }));
+        list.querySelectorAll('.copy-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const pre = document.getElementById(e.currentTarget.dataset.target); if (pre) copyToClipboard(pre.innerText, e.currentTarget); }));
+        list.querySelectorAll('.save-notes-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; const ta = list.querySelector(`textarea.notes-input[data-mac="${t.dataset.mac}"]`); saveNotes(t.dataset.mac, ta.value, t); }));
+        list.querySelectorAll('.save-dhcp-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; const fp = list.querySelector(`input.dhcp-input[data-mac="${t.dataset.mac}"][data-field="dhcp_fingerprint"]`); const vc = list.querySelector(`input.dhcp-input[data-mac="${t.dataset.mac}"][data-field="dhcp_vendor_class"]`); saveDHCP(t.dataset.mac, fp.value, vc.value, t); }));
+        // Group header click — toggle collapsed state for that group
+        list.querySelectorAll('tr.group-header').forEach(tr => {
+            tr.addEventListener('click', () => toggleGroup(tr.dataset.group));
+        });
+    }
+
+    function toggleGroup(label) {
+        if (collapsedGroups.has(label)) collapsedGroups.delete(label);
+        else collapsedGroups.add(label);
+        saveCollapsedGroups();
+        renderTable();
+    }
+
+    function renderAIBlock(ai, analyzedAt, mac) {
+        if (!ai || Object.keys(ai).length === 0) return `<p class="text-ink-500 italic text-sm">No AI analysis yet. Click the 🧠 icon above to query Gemini.</p>`;
+        const confTone = { low: 'text-danger-500', medium: 'text-warning-600', high: 'text-success-600' }[ai.confidence] || 'text-ink-500';
+        const shortName = esc(ai.short_name || '');
+        const macAttr = esc(mac);
+        const structured = `${esc(ai.short_name || '?')} · ${esc(ai.normalized_os || '?')} · ${esc(ai.normalized_type || '?')}`;
+        // The brief description displays at the top — it's what the column shows
+        // and is the most "headline-y" piece of intel we have. Older analyses
+        // won't have it; in that case skip the row rather than show "—".
+        const briefRow = ai.brief_description ? `
+            <div class="bg-purple-50/60 border-l-2 border-purple-500 px-3 py-2 rounded">
+                <div class="text-[10px] text-purple-700 uppercase tracking-wide mb-0.5">At a glance</div>
+                <div class="text-purple-900 text-[14px] font-medium">${esc(ai.brief_description)}</div>
+            </div>
+        ` : '';
+        return `${briefRow}<div class="grid grid-cols-2 gap-6 text-sm ${briefRow ? 'mt-3' : ''}">
+            <div class="space-y-3">
+                <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Summary</div><div class="text-ink-900">${esc(ai.summary || '—')}</div></div>
+                <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Standard Fields (template uses these)</div><code class="font-mono text-purple-700 bg-purple-50 px-2 py-1 rounded text-sm">${structured}</code></div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Manufacturer</div><div class="text-ink-900">${esc(ai.manufacturer || '—')}</div></div>
+                    <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Product Type</div><div class="text-ink-900">${esc(ai.product_type || '—')}</div></div>
+                </div>
+                <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Confidence</div><div class="${confTone} font-semibold uppercase text-sm">${esc(ai.confidence || '—')}</div></div>
+            </div>
+            <div class="space-y-3">
+                <div>
+                    <div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Suggested Short Name</div>
+                    <div class="flex items-center gap-2">
+                        <code class="font-mono text-purple-700 font-semibold bg-purple-50 px-2 py-1 rounded">${shortName || '—'}</code>
+                        ${shortName ? `<button data-mac="${macAttr}" data-name="${shortName}" class="push-ai-btn bg-brand-500 hover:bg-brand-600 text-white px-2.5 py-1 rounded text-xs font-medium transition">Push as Name</button>` : ''}
+                    </div>
+                </div>
+                <div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Reasoning</div><div class="text-ink-700 leading-relaxed text-[13px]">${esc(ai.reasoning || '—')}</div></div>
+                ${ai.security_notes ? `<div><div class="text-[11px] text-ink-500 uppercase tracking-wide mb-1">Security Notes</div><div class="text-warning-600 leading-relaxed text-[13px]">${esc(ai.security_notes)}</div></div>` : ''}
+                <div class="text-[11px] text-ink-400 pt-2">${esc(ai._model || 'gemini')} · ${esc(analyzedAt || '')}</div>
+            </div>
+        </div>`;
+    }
+
+    const CURL_LABELS = {
+        token:      ['1. Get access token', 'Run once per session (token lasts 2h)'],
+        inspect:    ['2. Inspect this client', 'GET + jq filter to confirm the MAC is visible'],
+        rename:     ['3a. Rename — object PATCH', 'PATCH /clients/{mac} with name in body'],
+        rename_alt: ['3b. Rename — /name subpath', 'Fallback path if 3a returns errorCode != 0'],
+    };
+
+    function renderCurlBlock(curl) {
+        if (!curl) return '<p class="text-ink-500 italic text-sm">No curl data.</p>';
+        let html = '';
+        for (const [key, [title, hint]] of Object.entries(CURL_LABELS)) {
+            if (!curl[key]) continue;
+            const id = `curl-${key}-${Math.random().toString(36).slice(2, 8)}`;
+            html += `<div class="mb-3"><div class="flex justify-between items-center mb-1"><div><span class="text-ink-700 text-xs font-semibold">${esc(title)}</span><span class="text-ink-500 text-[11px] ml-2">${esc(hint)}</span></div><button data-target="${id}" class="copy-btn bg-ink-100 hover:bg-ink-200 text-ink-700 px-2.5 py-1 rounded text-xs font-medium transition">Copy</button></div><pre id="${id}" class="text-[11px] text-ink-900 bg-ink-50 border border-ink-200 p-2.5 rounded overflow-x-auto font-mono whitespace-pre">${esc(curl[key])}</pre></div>`;
+        }
+        return html;
+    }
+
+    async function copyToClipboard(text, btn) {
+        try { await navigator.clipboard.writeText(text); const o = btn.innerText; btn.innerText = 'Copied'; setTimeout(() => btn.innerText = o, 1200); }
+        catch (e) { showError('Clipboard write failed: ' + e.message); }
+    }
+
+    async function saveTemplate() {
+        const template = document.getElementById('naming-template').value;
+        const gemini_model = document.getElementById('gemini-model').value;
+        const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ template, gemini_model }) });
+        if (!r.ok) showError('Failed to save settings');
+        loadData();
+    }
+
+    function populateModelDropdown(models, selected) {
+        const sel = document.getElementById('gemini-model');
+        if (!models || sel.dataset.populated === '1') { if (selected) sel.value = selected; return; }
+        sel.innerHTML = '';
+        models.forEach(m => { const o = document.createElement('option'); o.value = m.id; o.textContent = `${m.label} — ${m.tier}`; if (m.id === selected) o.selected = true; sel.appendChild(o); });
+        sel.dataset.populated = '1';
+    }
+
+    function showError(msg) {
+        const banner = document.getElementById('error-banner');
+        banner.innerHTML = msg ? `<div class="bg-danger-50 border border-danger-500/30 text-danger-600 text-sm px-3 py-2 rounded"><span class="font-semibold">⚠ </span>${esc(msg)}</div>` : '';
+    }
+
+    function renderDHCPBanner(s) {
+        let dotCls, bgCls, msg;
+        const isLocal = s.mode === 'local';
+        // In local mode the parser sees real Ethernet frames off the wire,
+        // not TZSP wrappers — relabel counters accordingly.
+        const frameLabel = isLocal ? 'frames' : 'TZSP';
+        const sourceDesc = isLocal
+            ? `local sniff on ${s.iface || 'auto'}`
+            : `UDP/${s.listen_port}`;
+        const listenerDesc = isLocal ? 'Local sniffer' : 'TZSP listener';
+        const breakdownParts = [`${s.tzsp_packets} ${frameLabel}`, `${s.dhcp_packets} DHCP`];
+        const mdnsPkts = s.mdns_packets || 0;
+        const mdnsEmitted = s.mdns_records_emitted || 0;
+        breakdownParts.push(`${mdnsPkts} mDNS`);
+        const breakdown = breakdownParts.join(', ');
+
+        if (!s.enabled) {
+            dotCls = 'bg-ink-400'; bgCls = 'bg-ink-50 border-ink-200 text-ink-600';
+            msg = `${listenerDesc} disabled · ${s.stored_fingerprints} fingerprints in DB`;
+        } else if (s.error) {
+            dotCls = 'bg-danger-500'; bgCls = 'bg-danger-50 border-danger-500/30 text-danger-600';
+            msg = `${listenerDesc} error: ${s.error}`;
+        } else if (s.running) {
+            if (s.packets_received === 0) {
+                dotCls = 'bg-warning-500 animate-pulse'; bgCls = 'bg-warning-50 border-warning-500/30 text-warning-600';
+                msg = `${listenerDesc} live on ${sourceDesc} · waiting for packets... · ${s.stored_fingerprints} fingerprints in DB`;
+            } else {
+                dotCls = 'bg-success-500'; bgCls = 'bg-success-50 border-success-500/30 text-success-600';
+                const src = (!isLocal && s.last_source_ip) ? `from ${s.last_source_ip}` : '';
+                const lastMac = s.last_packet_mac ? ` · last DHCP: ${s.last_packet_mac}` : '';
+                msg = `${listenerDesc} live on ${sourceDesc} ${src} · ${s.packets_received} pkts (${breakdown}) · ${s.stored_fingerprints} fingerprints in DB${lastMac}`;
+            }
+        } else {
+            dotCls = 'bg-warning-500'; bgCls = 'bg-warning-50 border-warning-500/30 text-warning-600';
+            msg = `${listenerDesc} starting on ${sourceDesc}...`;
+        }
+
+        // Diagnostic: zero mDNS despite traffic flowing.
+        // In tzsp mode this is usually a missing 5353 in the upstream filter.
+        // In local mode it usually means the switch is doing IGMP snooping or
+        // there's a VLAN boundary, but we can't fix that from here — suggest
+        // verification from another host.
+        let mdnsHint = '';
+        if (s.enabled && s.running && s.tzsp_packets >= 2 && mdnsPkts === 0) {
+            if (isLocal) {
+                mdnsHint = `<div class="bg-warning-50 border border-warning-500/30 text-warning-600 text-[12px] px-3 py-2 rounded mt-2 flex items-start gap-2">
+                    <span style="font-size:14px;line-height:1.2">⚠️</span>
+                    <div>
+                        <div class="font-medium">Sniffing locally but no mDNS yet</div>
+                        <div class="mt-0.5 text-warning-600/90">DHCP frames are arriving on the host's NIC but no mDNS multicast. Verify mDNS is actually flowing on this subnet from another host: <code class="font-mono bg-white/60 px-1 rounded">tcpdump -i any -n udp port 5353</code>. If you see nothing there either, your switch may be IGMP-filtering 224.0.0.251.</div>
+                    </div>
+                </div>`;
+            } else {
+                mdnsHint = `<div class="bg-warning-50 border border-warning-500/30 text-warning-600 text-[12px] px-3 py-2 rounded mt-2 flex items-start gap-2">
+                    <span style="font-size:14px;line-height:1.2">⚠️</span>
+                    <div>
+                        <div class="font-medium">Receiving TZSP but no mDNS yet</div>
+                        <div class="mt-0.5 text-warning-600/90">Your upstream sniffer is forwarding DHCP packets but no mDNS (UDP/5353). To capture mDNS/Bonjour, update the MikroTik filter to include port 5353:</div>
+                        <code class="block mt-1 font-mono text-[11px] bg-white/60 px-2 py-1 rounded">/tool sniffer set filter-port=bootps,bootpc,5353<br>/tool sniffer stop; /tool sniffer start</code>
+                        <div class="mt-1 text-warning-600/90">If 5353 is already in the filter but mDNS still doesn't arrive, the multicast traffic isn't reaching the MikroTik. Switch to local-sniff mode: in docker-compose set <code class="font-mono bg-white/60 px-1 rounded">CAPTURE_MODE=local</code>, <code class="font-mono bg-white/60 px-1 rounded">network_mode: host</code>, <code class="font-mono bg-white/60 px-1 rounded">cap_add: [NET_RAW]</code>, then rebuild.</div>
+                    </div>
+                </div>`;
+            }
+        } else if (s.enabled && s.running && mdnsPkts > 0 && mdnsEmitted === 0) {
+            // Packets arrived but couldn't be decoded (rare — would indicate
+            // a TZSP encapsulation issue or oversized fragmented mDNS).
+            mdnsHint = `<div class="bg-warning-50 border border-warning-500/30 text-warning-600 text-[12px] px-3 py-2 rounded mt-2">
+                ⚠️ Received ${mdnsPkts} mDNS packets but couldn't decode any records. Check container logs for parse errors.
+            </div>`;
+        }
+
+        return `<div class="${bgCls} border text-[12px] px-3 py-2 rounded flex items-center gap-2"><span class="dot ${dotCls}"></span>${esc(msg)}</div>${mdnsHint}`;
+    }
+
+    async function renderDHCPStatus() {
+        try {
+            const r = await fetch('/api/dhcp_status');
+            const s = await r.json();
+            // Banner on Clients view
+            const banner = document.getElementById('dhcp-status-banner');
+            if (banner) banner.innerHTML = renderDHCPBanner(s);
+            // Detail on DHCP view
+            const detail = document.getElementById('dhcp-detail-status');
+            if (detail) detail.innerHTML = renderDHCPBanner(s);
+            const ports = { port: s.listen_port, source: s.last_source_ip || '—', pkts: `${s.packets_received} / ${s.dhcp_packets} DHCP`, fp: s.stored_fingerprints };
+            const dp = document.getElementById('dhcp-stat-port');    if (dp) dp.textContent = ports.port || '—';
+            const ds = document.getElementById('dhcp-stat-source');  if (ds) ds.textContent = ports.source;
+            const dpkt = document.getElementById('dhcp-stat-pkts');  if (dpkt) dpkt.textContent = ports.pkts;
+            const df = document.getElementById('dhcp-stat-fp');      if (df) df.textContent = ports.fp;
+
+            // Captured fingerprints table
+            const fpList = document.getElementById('dhcp-fp-list');
+            if (fpList) {
+                const captured = currentClients.filter(c => c.dhcp_fingerprint);
+                if (captured.length === 0) {
+                    fpList.innerHTML = `<tr><td colspan="5" class="px-3 py-8 text-center text-ink-500 italic">No fingerprints captured yet. Trigger a DHCP renewal on any device to populate.</td></tr>`;
+                } else {
+                    fpList.innerHTML = captured.map(c => `
+                        <tr class="border-t border-ink-200">
+                            <td class="px-3 py-2 font-mono text-[11px]">${esc(c.mac)}</td>
+                            <td class="px-3 py-2 text-ink-700">${esc(c.host_name_resolved || '—')}</td>
+                            <td class="px-3 py-2 font-mono text-info-500">${esc(c.dhcp_fingerprint || '')}</td>
+                            <td class="px-3 py-2 font-mono text-ink-700">${esc(c.dhcp_vendor_class || '—')}</td>
+                            <td class="px-3 py-2 text-[11px] text-ink-500">${esc(c.dhcp_captured_at || '—')}</td>
+                        </tr>`).join('');
+                }
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    async function loadData() {
+        try {
+            const setRes = await fetch('/api/settings'); const setData = await setRes.json();
+            document.getElementById('naming-template').value = setData.template;
+            populateModelDropdown(setData.gemini_models, setData.gemini_model);
+            const res = await fetch('/api/clients'); const body = await res.json();
+            if (!res.ok) { showError(body.error || 'Failed to load clients'); currentClients = body.clients || []; }
+            else { showError(null); currentClients = body.clients || []; if (body.site) document.getElementById('site-label').textContent = body.site; }
+        } catch (e) { showError('Network error: ' + e.message); return; }
+        updateStats(); renderTable(); renderDHCPStatus(); updatePolicyPreview();
+    }
+
+    async function saveDHCP(mac, fingerprint, vendor_class, btn) {
+        const o = btn.innerText; btn.innerText = '...'; btn.disabled = true;
+        try {
+            const r = await fetch('/api/dhcp_manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac, dhcp_fingerprint: fingerprint, dhcp_vendor_class: vendor_class }) });
+            const body = await r.json();
+            if (!r.ok) showError(body.error || 'Failed to save fingerprint');
+            else { btn.innerText = 'Saved ✓'; const t = currentClients.find(c => c.mac === mac); if (t) { t.dhcp_fingerprint = body.dhcp_fingerprint; t.dhcp_vendor_class = body.dhcp_vendor_class; } setTimeout(() => { pendingExpandMac = mac; updateStats(); renderTable(); }, 600); }
+        } catch (e) { showError('Save failed: ' + e.message); }
+        finally { setTimeout(() => { btn.innerText = o; btn.disabled = false; }, 600); }
+    }
+
+    async function saveNotes(mac, notes, btn) {
+        const o = btn.innerText; btn.innerText = '...'; btn.disabled = true;
+        try {
+            const r = await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac, notes }) });
+            const body = await r.json();
+            if (!r.ok) showError(body.error || 'Failed to save notes');
+            else { btn.innerText = 'Saved ✓'; const t = currentClients.find(c => c.mac === mac); if (t) t.notes = body.notes || ''; setTimeout(() => { pendingExpandMac = mac; updateStats(); renderTable(); }, 600); }
+        } catch (e) { showError('Save failed: ' + e.message); }
+        finally { setTimeout(() => { btn.innerText = o; btn.disabled = false; }, 600); }
+    }
+
+    async function scanUnidentified() {
+        const btns = [document.getElementById('scan-btn'), document.getElementById('scan-btn-2')].filter(Boolean);
+        btns.forEach(b => b.disabled = true);
+        let total = 0, done = 0, errors = 0;
+        try {
+            while (true) {
+                btns.forEach(b => b.innerText = total ? `Scanning ${done + 1}/${total}...` : 'Scanning...');
+                const r = await fetch('/api/scan_unidentified', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max: 1 }) });
+                const body = await r.json();
+                if (!r.ok) { showError(body.error || 'Scan failed'); break; }
+                if (total === 0) total = body.total_unidentified_before;
+                if (body.analyzed.length === 0 && body.errors.length === 0) break;
+                done += body.analyzed.length; errors += body.errors.length;
+                if (body.remaining === 0) break;
+            }
+            btns.forEach(b => b.innerText = errors ? `Done: ${done} ok, ${errors} fail` : `Done: ${done} analyzed`);
+            if (errors) showError(`${errors} device(s) failed analysis`);
+        } catch (e) { showError('Scan failed: ' + e.message); btns.forEach(b => b.innerText = 'Scan failed'); }
+        finally { setTimeout(() => { btns.forEach(b => { b.disabled = false; b.innerText = '🧠 Scan Unidentified'; }); loadData(); }, 2500); }
+    }
+
+    async function syncAll() {
+        const btn = document.getElementById('sync-all-btn'); btn.disabled = true; btn.innerText = 'Checking...';
+        let preview;
+        try {
+            const r = await fetch('/api/sync_all_mismatched', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dry_run: true }) });
+            preview = await r.json();
+            if (!r.ok) { showError(preview.error || 'Failed to preview sync'); btn.disabled = false; btn.innerText = 'Sync All Mismatched'; return; }
+        } catch (e) { showError('Preview failed: ' + e.message); btn.disabled = false; btn.innerText = 'Sync All Mismatched'; return; }
+        const count = preview.would_sync || 0;
+        if (count === 0) { btn.innerText = 'Nothing to sync'; setTimeout(() => { btn.disabled = false; btn.innerText = 'Sync All Mismatched'; }, 1500); return; }
+        const sample = preview.candidates.slice(0, 5).map(c => `  ${c.mac}  "${c.current || '(empty)'}"  →  "${c.proposed}"`).join('\n');
+        const moreLine = count > 5 ? `\n  ... and ${count - 5} more` : '';
+        if (!confirm(`Push ${count} mismatched name${count === 1 ? '' : 's'} to Omada?\n\n${sample}${moreLine}`)) { btn.disabled = false; btn.innerText = 'Sync All Mismatched'; return; }
+        btn.innerText = `Pushing ${count}...`;
+        try {
+            const r = await fetch('/api/sync_all_mismatched', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+            const body = await r.json();
+            if (body.errors && body.errors.length) { const s = body.errors.slice(0, 3).map(e => `${e.mac}: ${e.error}`).join('; '); showError(`Synced ${body.synced}/${body.total_candidates}. ${body.errors.length} failed — ${s}${body.errors.length > 3 ? ` (+${body.errors.length - 3} more)` : ''}`); }
+            else showError(null);
+            btn.innerText = `✓ Synced ${body.synced} of ${body.total_candidates}`;
+        } catch (e) { showError('Sync failed: ' + e.message); btn.innerText = 'Sync failed'; }
+        finally { setTimeout(() => { btn.disabled = false; btn.innerText = 'Sync All Mismatched'; loadData(); }, 2500); }
+    }
+
+
+    async function manualPush(mac, name, btn) {
+        const o = btn.innerHTML; btn.innerHTML = '⋯'; btn.disabled = true;
+        try {
+            const r = await fetch('/api/sync_name', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac, name }) });
+            const body = await r.json();
+            if (!r.ok || body.errorCode !== 0) { btn.innerHTML = '✗'; btn.style.color = '#ff4d4f'; showError(`Push failed for ${mac}: ${body.error || body.msg || 'unknown'}`); setTimeout(() => { btn.innerHTML = o; btn.style.color = ''; btn.disabled = false; }, 2500); }
+            else { btn.innerHTML = '✓'; btn.style.color = '#52c41a'; showError(null); setTimeout(() => loadData(), 600); }
+        } catch (e) { btn.innerHTML = '✗'; btn.style.color = '#ff4d4f'; showError('Push failed: ' + e.message); setTimeout(() => { btn.innerHTML = o; btn.style.color = ''; btn.disabled = false; }, 2500); }
+    }
+
+    function toggleRow(id) {
+        const el = document.getElementById(id);
+        const isVis = el.classList.contains('expanded');
+        document.querySelectorAll('.detail-pane').forEach(r => r.classList.remove('expanded'));
+        if (!isVis) el.classList.add('expanded');
+    }
+
+    async function toggleAuto(mac, state) { await fetch('/api/toggle_auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac, state }) }); }
+    async function refreshFB(mac) { const r = await fetch('/api/refresh_fingerbank', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac }) }); if (!r.ok) showError(`Fingerbank failed for ${mac}`); loadData(); }
+    async function runAI(mac, btn) {
+        const o = btn.innerHTML; btn.innerHTML = '⏳'; btn.disabled = true;
+        try {
+            const r = await fetch('/api/ai_analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac }) });
+            const body = await r.json();
+            if (!r.ok) showError(`AI analysis failed: ${body.error || 'unknown'}`); else { showError(null); pendingExpandMac = mac; }
+        } catch (e) { showError('AI request failed: ' + e.message); }
+        finally { btn.innerHTML = o; btn.disabled = false; await loadData(); }
+    }
+
+    // ============== VIEW SWITCHING ==============
+    const VIEW_TITLES = { clients: 'Clients', policy: 'Naming Policy', 'ai-model': 'AI Models', dhcp: 'DHCP Capture', fingerbank: 'Fingerbank', settings: 'Settings' };
+    function showView(name) {
+        currentView = name;
+        document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.target === name));
+        document.getElementById('view-title').textContent = `SDN Identity Engine · ${VIEW_TITLES[name] || ''}`;
+        // Initial-data refresh for views that need it
+        if (name === 'dhcp') renderDHCPStatus();
+        if (name === 'policy') updatePolicyPreview();
+        if (name === 'clients') renderTable();
+        if (name === 'settings') loadSettings();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', (e) => { e.preventDefault(); showView(item.dataset.target); }));
+
+    // ============== SIDEBAR COLLAPSE ==============
+    document.getElementById('sidebar-toggle').addEventListener('click', () => {
+        document.body.classList.toggle('sidebar-collapsed');
+        try { localStorage.setItem('sidebar_collapsed', document.body.classList.contains('sidebar-collapsed') ? '1' : '0'); } catch {}
+    });
+    try { if (localStorage.getItem('sidebar_collapsed') === '1') document.body.classList.add('sidebar-collapsed'); } catch {}
+
+    // ============== COLUMN RESIZE ==============
+    function setupColumnResize() {
+        const ths = document.querySelectorAll('#client-table thead th');
+        const colgroup = document.querySelector('#client-table colgroup');
+        ths.forEach((th, idx) => {
+            if (idx === ths.length - 1) return; // skip last
+            // Remove existing resizer if any
+            th.querySelector('.col-resizer')?.remove();
+            const resizer = document.createElement('div');
+            resizer.className = 'col-resizer';
+            th.appendChild(resizer);
+            resizer.addEventListener('mousedown', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const startX = e.pageX;
+                const col = colgroup.children[idx];
+                const startWidth = col.offsetWidth || th.offsetWidth;
+                document.body.classList.add('resizing');
+                resizer.classList.add('active');
+                const move = (ev) => {
+                    const newWidth = Math.max(40, startWidth + ev.pageX - startX);
+                    col.style.width = newWidth + 'px';
+                };
+                const up = () => {
+                    document.body.classList.remove('resizing');
+                    resizer.classList.remove('active');
+                    document.removeEventListener('mousemove', move);
+                    document.removeEventListener('mouseup', up);
+                };
+                document.addEventListener('mousemove', move);
+                document.addEventListener('mouseup', up);
+            });
+        });
+    }
+
+    // ============== COLUMN FILTERS ==============
+    function setupColumnFilters() {
+        document.querySelectorAll('.col-filter-trigger').forEach(trigger => {
+            trigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const col = trigger.dataset.col;
+                // Close any other popovers
+                document.querySelectorAll('.col-filter-popover').forEach(p => p.remove());
+                const popover = document.createElement('div');
+                popover.className = 'col-filter-popover';
+                popover.innerHTML = `<input type="text" placeholder="Filter ${col}..." value="${esc(columnFilters[col] || '')}">`;
+                trigger.closest('th').appendChild(popover);
+                const input = popover.querySelector('input');
+                input.focus(); input.select();
+                input.addEventListener('input', () => {
+                    columnFilters[col] = input.value;
+                    renderTable();
+                });
+                const closeOnClickOutside = (ev) => {
+                    if (!popover.contains(ev.target) && ev.target !== trigger) {
+                        popover.remove();
+                        document.removeEventListener('click', closeOnClickOutside);
+                    }
+                };
+                setTimeout(() => document.addEventListener('click', closeOnClickOutside), 0);
+            });
+        });
+    }
+
+    // ============================================================
+    // Group-by picker: choose a single column to group rows under,
+    // or pick None to render flat. Only columns flagged groupable:true
+    // in the registry can be selected.
+    // ============================================================
+    function getGroupableColumns() {
+        return ALL_COLUMN_KEYS.filter(k => COLUMN_REGISTRY[k].groupable);
+    }
+
+    function updateGroupByButtonLabel() {
+        const lbl = document.getElementById('groupby-label');
+        if (!lbl) return;
+        if (currentGroupBy && COLUMN_REGISTRY[currentGroupBy]) {
+            lbl.textContent = COLUMN_REGISTRY[currentGroupBy].label;
+            lbl.classList.remove('text-ink-500');
+            lbl.classList.add('text-brand-700');
+        } else {
+            lbl.textContent = 'None';
+            lbl.classList.remove('text-brand-700');
+            lbl.classList.add('text-ink-500');
+        }
+    }
+
+    function openGroupByPicker() {
+        const panel = document.getElementById('groupby-panel');
+        const groupable = getGroupableColumns();
+        const collapsedCount = collapsedGroups.size;
+        panel.innerHTML = `
+            <div class="columns-panel-header">
+                <span class="font-medium text-ink-900">Group by</span>
+                <button id="groupby-close" class="text-ink-500 hover:text-ink-900" style="font-size:18px;line-height:1;width:20px;height:20px;">×</button>
+            </div>
+            <div class="columns-panel-list">
+                <label class="columns-panel-item">
+                    <input type="radio" name="groupby-choice" value="" ${!currentGroupBy ? 'checked' : ''}>
+                    <span class="text-ink-500">None</span>
+                </label>
+                ${groupable.map(key => {
+                    const spec = COLUMN_REGISTRY[key];
+                    return `<label class="columns-panel-item">
+                        <input type="radio" name="groupby-choice" value="${esc(key)}" ${currentGroupBy === key ? 'checked' : ''}>
+                        ${esc(spec.label)}
+                    </label>`;
+                }).join('')}
+            </div>
+            ${currentGroupBy ? `
+                <div style="padding: 8px 14px; border-top: 1px solid #f0f0f0; display: flex; gap: 8px; align-items: center;">
+                    <button id="groupby-expand-all" class="text-[12px] text-brand-700 hover:underline">Expand all</button>
+                    <span class="text-ink-300">·</span>
+                    <button id="groupby-collapse-all" class="text-[12px] text-brand-700 hover:underline">Collapse all</button>
+                    ${collapsedCount ? `<span class="ml-auto text-[11px] text-ink-500">${collapsedCount} collapsed</span>` : ''}
+                </div>
+            ` : ''}
+        `;
+        panel.classList.remove('hidden');
+
+        panel.querySelector('#groupby-close').addEventListener('click', closeGroupByPicker);
+        panel.querySelectorAll('input[name="groupby-choice"]').forEach(r => {
+            r.addEventListener('change', e => setGroupBy(e.target.value || null));
+        });
+        const ea = panel.querySelector('#groupby-expand-all');
+        if (ea) ea.addEventListener('click', () => {
+            collapsedGroups.clear();
+            saveCollapsedGroups();
+            renderTable();
+            openGroupByPicker();
+        });
+        const ca = panel.querySelector('#groupby-collapse-all');
+        if (ca) ca.addEventListener('click', () => {
+            const groups = groupClients(filterClients(currentClients));
+            if (groups) {
+                groups.forEach(g => collapsedGroups.add(g.label));
+                saveCollapsedGroups();
+                renderTable();
+                openGroupByPicker();
+            }
+        });
+    }
+
+    function closeGroupByPicker() {
+        const p = document.getElementById('groupby-panel');
+        if (p) p.classList.add('hidden');
+    }
+
+    function setGroupBy(key) {
+        if (key && !(key in COLUMN_REGISTRY && COLUMN_REGISTRY[key].groupable)) return;
+        currentGroupBy = key;
+        // Reset collapsed state when changing the group field — old labels
+        // are meaningless under the new grouping.
+        collapsedGroups.clear();
+        saveGroupBy();
+        saveCollapsedGroups();
+        renderTable();
+        openGroupByPicker();
+    }
+
+    // ============================================================
+    // Columns picker: toggle visibility of columns from the registry.
+    // ============================================================
+    function openColumnsPicker() {
+        const panel = document.getElementById('columns-panel');
+        const isDefault = visibleColumns.length === DEFAULT_COLUMNS.length &&
+            visibleColumns.every((k, i) => k === DEFAULT_COLUMNS[i]);
+        const isAll = visibleColumns.length === ALL_COLUMN_KEYS.length;
+        panel.innerHTML = `
+            <div class="columns-panel-header">
+                <span class="font-medium text-ink-900">Display Options</span>
+                <button id="columns-close" class="text-ink-500 hover:text-ink-900" style="font-size:18px;line-height:1;width:20px;height:20px;">×</button>
+            </div>
+            <div class="columns-panel-presets">
+                <label class="columns-panel-preset"><input type="radio" name="col-preset" value="default" ${isDefault ? 'checked' : ''}> Default Columns</label>
+                <label class="columns-panel-preset"><input type="radio" name="col-preset" value="all" ${isAll ? 'checked' : ''}> All Columns</label>
+                <label class="columns-panel-preset"><input type="radio" name="col-preset" value="custom" ${!isDefault && !isAll ? 'checked' : ''}> Customize Columns</label>
+            </div>
+            <div class="columns-panel-list">
+                ${ALL_COLUMN_KEYS.map(key => {
+                    const spec = COLUMN_REGISTRY[key];
+                    const checked = visibleColumns.includes(key);
+                    const disabled = spec.alwaysOn;
+                    return `<label class="columns-panel-item ${disabled ? 'disabled' : ''}">
+                        <input type="checkbox" data-col-key="${esc(key)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+                        ${esc(spec.label)}
+                    </label>`;
+                }).join('')}
+            </div>
+        `;
+        panel.classList.remove('hidden');
+
+        panel.querySelector('#columns-close').addEventListener('click', closeColumnsPicker);
+        panel.querySelectorAll('input[name="col-preset"]').forEach(r => {
+            r.addEventListener('change', (e) => setColumnPreset(e.target.value));
+        });
+        panel.querySelectorAll('input[data-col-key]').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                toggleColumn(e.target.dataset.colKey, e.target.checked);
+            });
+        });
+    }
+
+    function closeColumnsPicker() {
+        document.getElementById('columns-panel').classList.add('hidden');
+    }
+
+    function toggleColumn(key, on) {
+        if (!(key in COLUMN_REGISTRY)) return;
+        if (COLUMN_REGISTRY[key].alwaysOn) return;
+        if (on) {
+            // Insert in the registry-defined order so toggling preserves a
+            // predictable column sequence.
+            if (visibleColumns.includes(key)) return;
+            const insertAt = ALL_COLUMN_KEYS.indexOf(key);
+            let target = visibleColumns.length;
+            for (let i = 0; i < visibleColumns.length; i++) {
+                if (ALL_COLUMN_KEYS.indexOf(visibleColumns[i]) > insertAt) {
+                    target = i; break;
+                }
+            }
+            visibleColumns.splice(target, 0, key);
+        } else {
+            visibleColumns = visibleColumns.filter(k => k !== key);
+        }
+        saveVisibleColumns();
+        buildTableStructure();
+        setupColumnResize();
+        setupColumnFilters();
+        renderTable();
+    }
+
+    function setColumnPreset(preset) {
+        if (preset === 'default') visibleColumns = [...DEFAULT_COLUMNS];
+        else if (preset === 'all') visibleColumns = [...ALL_COLUMN_KEYS];
+        // 'custom' is implicit when user toggles individual checkboxes — no-op here
+        if (preset === 'default' || preset === 'all') {
+            saveVisibleColumns();
+            buildTableStructure();
+            setupColumnResize();
+            setupColumnFilters();
+            renderTable();
+            // Refresh the picker so checkboxes mirror the new state
+            openColumnsPicker();
+        }
+    }
+
+    // Click outside the panel to dismiss
+    document.addEventListener('click', (e) => {
+        const colPanel = document.getElementById('columns-panel');
+        const colBtn = document.getElementById('columns-btn');
+        if (colPanel && !colPanel.classList.contains('hidden')
+            && !colPanel.contains(e.target) && !colBtn.contains(e.target)) {
+            closeColumnsPicker();
+        }
+        const grpPanel = document.getElementById('groupby-panel');
+        const grpBtn = document.getElementById('groupby-btn');
+        if (grpPanel && !grpPanel.classList.contains('hidden')
+            && !grpPanel.contains(e.target) && !grpBtn.contains(e.target)) {
+            closeGroupByPicker();
+        }
+    });
+
+    // ============ SETTINGS VIEW ============
+    // Loads the current config from /api/config, wires the form to save edits,
+    // and provides two "Test" buttons that hit /api/config/test_* endpoints.
+    let settingsRevealed = false;
+
+    async function loadSettings() {
+        const loading = document.getElementById('settings-loading');
+        const form = document.getElementById('settings-form');
+        loading.classList.remove('hidden');
+        form.classList.add('hidden');
+        try {
+            const url = settingsRevealed ? '/api/config?reveal=1' : '/api/config';
+            const r = await fetch(url);
+            const data = await r.json();
+            document.getElementById('cfg-omada-url').value = data.omada_url || '';
+            document.getElementById('cfg-omada-client-id').value = data.omada_client_id || '';
+            document.getElementById('cfg-omada-client-secret').value = data.omada_client_secret || '';
+            document.getElementById('cfg-fingerbank-key').value = data.fingerbank_api_key || '';
+            document.getElementById('cfg-gemini-key').value = data.gemini_api_key || '';
+            // Source badges (ENV vs DB)
+            const sources = data._sources || {};
+            document.querySelectorAll('.source-badge').forEach(el => {
+                const field = el.dataset.sourceFor;
+                const src = sources[field];
+                if (src === 'db') {
+                    el.innerHTML = '<span class="text-[10px] bg-success-50 text-success-600 border border-success-500/20 px-1.5 rounded">DB</span>';
+                } else if (src === 'env') {
+                    el.innerHTML = '<span class="text-[10px] bg-ink-100 text-ink-500 border border-ink-200 px-1.5 rounded">ENV</span>';
+                } else {
+                    el.innerHTML = '';
+                }
+            });
+            document.getElementById('settings-reveal-btn').textContent =
+                settingsRevealed ? 'Hide secrets' : 'Show full secrets';
+            loading.classList.add('hidden');
+            form.classList.remove('hidden');
+        } catch (e) {
+            loading.innerHTML = `<span class="text-danger-500">Failed to load config: ${esc(e.message || e)}</span>`;
+        }
+    }
+
+    async function saveSettings(btn) {
+        const status = document.getElementById('settings-save-status');
+        btn.disabled = true;
+        const orig = btn.textContent;
+        btn.textContent = 'Saving…';
+        status.textContent = '';
+        // Build payload — masked-secret placeholders (starting with •) are
+        // ignored server-side, so we can safely send everything.
+        const payload = {
+            omada_url:           document.getElementById('cfg-omada-url').value.trim(),
+            omada_client_id:     document.getElementById('cfg-omada-client-id').value.trim(),
+            omada_client_secret: document.getElementById('cfg-omada-client-secret').value,
+            fingerbank_api_key:  document.getElementById('cfg-fingerbank-key').value,
+            gemini_api_key:      document.getElementById('cfg-gemini-key').value,
+        };
+        try {
+            const r = await fetch('/api/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const body = await r.json();
+            if (!r.ok || body.status !== 'success') {
+                throw new Error(body.error || `HTTP ${r.status}`);
+            }
+            btn.textContent = 'Saved ✓';
+            status.textContent = 'Configuration applied. No restart needed.';
+            status.className = 'text-[12px] text-success-600';
+            setTimeout(() => { btn.disabled = false; btn.textContent = orig; status.textContent = ''; status.className = 'text-[12px] text-ink-500'; loadSettings(); }, 1500);
+        } catch (e) {
+            btn.disabled = false; btn.textContent = orig;
+            status.textContent = `Save failed: ${e.message || e}`;
+            status.className = 'text-[12px] text-danger-500';
+        }
+    }
+
+    async function testOmada() {
+        const result = document.getElementById('omada-test-result');
+        result.classList.remove('hidden');
+        result.className = 'text-[12px] mt-2 text-ink-500';
+        result.textContent = 'Testing…';
+        try {
+            const r = await fetch('/api/config/test_omada', { method: 'POST' });
+            const body = await r.json();
+            if (r.ok && body.status === 'ok') {
+                result.className = 'text-[12px] mt-2 text-success-600';
+                result.textContent = `✓ Connected to ${body.omada_url} (token: ${body.token_preview})`;
+            } else {
+                result.className = 'text-[12px] mt-2 text-danger-500';
+                result.textContent = `✗ ${body.error || `HTTP ${r.status}`}`;
+            }
+        } catch (e) {
+            result.className = 'text-[12px] mt-2 text-danger-500';
+            result.textContent = `✗ ${e.message || e}`;
+        }
+    }
+
+    async function testGemini() {
+        const result = document.getElementById('gemini-test-result');
+        result.classList.remove('hidden');
+        result.className = 'text-[12px] mt-2 text-ink-500';
+        result.textContent = 'Testing…';
+        try {
+            const r = await fetch('/api/config/test_gemini', { method: 'POST' });
+            const body = await r.json();
+            if (r.ok && body.status === 'ok') {
+                result.className = 'text-[12px] mt-2 text-success-600';
+                result.textContent = `✓ Key valid (${body.models_visible} models accessible)`;
+            } else {
+                result.className = 'text-[12px] mt-2 text-danger-500';
+                result.textContent = `✗ ${body.error || `HTTP ${r.status}`}`;
+            }
+        } catch (e) {
+            result.className = 'text-[12px] mt-2 text-danger-500';
+            result.textContent = `✗ ${e.message || e}`;
+        }
+    }
+
+    // ============ CHAT MODAL ============
+    // Conversation history is held in memory only. Each turn posts the full
+    // history to /api/chat. Scope = "all" (fleet) or a MAC (per-device).
+    let chatMessages = [];     // [{role: 'user'|'assistant', content: ...}, ...]
+    let chatScope = 'all';
+    let chatSending = false;
+
+    function openChat(scope) {
+        const modal = document.getElementById('chat-modal');
+        // Populate the scope <select> from currentClients so per-device chat works.
+        const sel = document.getElementById('chat-scope-select');
+        const previous = sel.value || 'all';
+        sel.innerHTML = '<option value="all">All clients</option>' +
+            (currentClients || []).map(c =>
+                `<option value="${esc(c.mac)}">${esc(c.name || c.dhcp_hostname || c.mac)} (${esc(c.mac)})</option>`
+            ).join('');
+        sel.value = scope || previous;
+        chatScope = sel.value;
+        updateChatScopeHint();
+        if (chatMessages.length === 0) renderChatEmpty();
+        modal.classList.remove('hidden');
+        setTimeout(() => document.getElementById('chat-input').focus(), 50);
+    }
+
+    function closeChat() {
+        document.getElementById('chat-modal').classList.add('hidden');
+    }
+
+    function updateChatScopeHint() {
+        const hint = document.getElementById('chat-scope-hint');
+        if (chatScope === 'all') {
+            const n = (currentClients || []).length;
+            hint.textContent = `(${n} ${n === 1 ? 'device' : 'devices'})`;
+        } else {
+            const c = (currentClients || []).find(x => x.mac === chatScope);
+            hint.textContent = c ? `(${c.ip || 'no IP'})` : '';
+        }
+    }
+
+    function renderChatEmpty() {
+        document.getElementById('chat-messages').innerHTML = `
+            <div class="text-center text-ink-500 text-[13px] py-8">
+                <div class="text-3xl mb-3">💬</div>
+                <div>Ask anything about ${chatScope === 'all' ? 'your network' : 'this device'}.</div>
+                <div class="text-[11px] mt-3 text-ink-400">Try: "Which devices haven't been identified yet?" · "What does this device do?" · "Are any of my cameras still using default names?"</div>
+            </div>
+        `;
+    }
+
+    // Regex that matches MAC addresses in both colon and dash forms.
+    // Used to make MACs in chat output clickable so the user can jump
+    // straight to that device's row and apply the analysis as notes.
+    const MAC_RE = /\b([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}\b/g;
+
+    // Normalise a MAC to the dash-uppercase form Omada uses internally
+    // ("AA-BB-CC-DD-EE-FF"). Lets us match Gemini's outputs (which may use
+    // colons or lowercase) against currentClients' MAC values.
+    function normalizeMac(mac) {
+        return String(mac || '').replace(/[:\-]/g, '').toUpperCase()
+            .match(/.{1,2}/g)?.join('-') || '';
+    }
+
+    // Find every unique MAC mentioned in a chunk of assistant text that
+    // actually exists in the current client list. Returns array of
+    // {mac, name} for chip buttons.
+    function extractMentionedDevices(text) {
+        const seen = new Set();
+        const out = [];
+        for (const m of String(text || '').matchAll(MAC_RE)) {
+            const norm = normalizeMac(m[0]);
+            if (seen.has(norm)) continue;
+            seen.add(norm);
+            const c = (currentClients || []).find(x => normalizeMac(x.mac) === norm);
+            if (c) out.push({ mac: c.mac, name: c.name || c.dhcp_hostname || c.mac });
+        }
+        return out;
+    }
+
+    function renderChatMessages() {
+        const list = document.getElementById('chat-messages');
+        if (chatMessages.length === 0) { renderChatEmpty(); return; }
+        list.innerHTML = chatMessages.map((m, idx) => {
+            if (m.role === 'user') {
+                return `<div class="flex justify-end">
+                    <div class="bg-brand-500 text-white px-3 py-2 rounded-lg max-w-[80%] text-[13px] whitespace-pre-wrap">${esc(m.content)}</div>
+                </div>`;
+            }
+            // Assistant rendering:
+            //  1. escape HTML
+            //  2. wrap backticks as <code>
+            //  3. wrap any MAC matching a real device as a clickable chip
+            //  4. append "Apply to device" chips below for each MAC mentioned
+            let html = esc(m.content)
+                .replace(/`([^`]+)`/g, '<code class="font-mono bg-ink-100 px-1 rounded">$1</code>')
+                .replace(MAC_RE, (match) => {
+                    const norm = normalizeMac(match);
+                    const known = (currentClients || []).some(c => normalizeMac(c.mac) === norm);
+                    if (!known) return match;
+                    return `<button class="chat-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted underline-offset-2" data-mac="${esc(norm)}" title="Jump to ${esc(norm)} in the table">${esc(match)}</button>`;
+                });
+            const mentioned = extractMentionedDevices(m.content);
+            const applyChips = mentioned.length ? `
+                <div class="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-ink-100">
+                    <span class="text-[11px] text-ink-500 self-center mr-1">Apply analysis to:</span>
+                    ${mentioned.map(d => `
+                        <button class="chat-apply-btn text-[11px] bg-success-50 hover:bg-success-100 text-success-600 border border-success-500/20 px-2 py-0.5 rounded transition" data-mac="${esc(d.mac)}" data-msg-idx="${idx}" title="Save this analysis as the device's owner notes">📌 ${esc(d.name)}</button>
+                    `).join('')}
+                </div>
+            ` : '';
+            return `<div class="flex justify-start">
+                <div class="bg-white border border-ink-200 px-3 py-2 rounded-lg max-w-[85%] text-[13px] text-ink-900">
+                    <div class="whitespace-pre-wrap">${html}</div>
+                    ${applyChips}
+                </div>
+            </div>`;
+        }).join('') + (chatSending ? `
+            <div class="flex justify-start">
+                <div class="bg-white border border-ink-200 px-3 py-2 rounded-lg text-[13px] text-ink-500 italic">Thinking…</div>
+            </div>
+        ` : '');
+
+        // Wire up MAC-link clicks: close the chat modal, switch to the
+        // clients view if needed, expand the row.
+        list.querySelectorAll('.chat-mac-link').forEach(btn => {
+            btn.addEventListener('click', () => jumpToDevice(btn.dataset.mac));
+        });
+        list.querySelectorAll('.chat-apply-btn').forEach(btn => {
+            btn.addEventListener('click', () => applyAnalysisAsNote(
+                btn.dataset.mac,
+                parseInt(btn.dataset.msgIdx, 10),
+                btn
+            ));
+        });
+
+        list.scrollTop = list.scrollHeight;
+    }
+
+    // Close the chat and reveal a specific device's row + detail pane.
+    function jumpToDevice(mac) {
+        closeChat();
+        showView('clients');
+        const norm = normalizeMac(mac);
+        // Wait a tick for view switch / table render
+        setTimeout(() => {
+            const idx = (currentClients || []).findIndex(c => normalizeMac(c.mac) === norm);
+            if (idx < 0) return;
+            pendingExpandMac = (currentClients || [])[idx].mac;
+            renderTable();
+            const row = document.getElementById(`row-${idx}`);
+            if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
+    }
+
+    // Save an assistant message as the owner notes for a specific device.
+    // Re-asks the user to confirm if the device already has notes (so we
+    // don't silently destroy a hand-written note with chat output).
+    async function applyAnalysisAsNote(mac, msgIdx, btn) {
+        const msg = chatMessages[msgIdx];
+        if (!msg || msg.role !== 'assistant') return;
+        const client = (currentClients || []).find(c => c.mac === mac);
+        const existing = client && client.notes;
+        let body = msg.content;
+        // Strip markdown bullets/asterisks for cleaner storage as plain notes
+        body = body.replace(/^\s*[-*]\s+/gm, '• ').trim();
+        if (existing) {
+            if (!confirm(`${mac} already has notes:\n\n"${existing.slice(0, 200)}${existing.length > 200 ? '…' : ''}"\n\nReplace them with this analysis?`)) {
+                return;
+            }
+        }
+        const orig = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = 'Saving…';
+        try {
+            const r = await fetch('/api/notes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mac, notes: body.slice(0, 2000) }),
+            });
+            const data = await r.json();
+            if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+            // Update local cache so the table reflects it without a full reload
+            if (client) client.notes = data.notes;
+            btn.innerHTML = '✓ Saved';
+            btn.classList.remove('bg-success-50', 'hover:bg-success-100');
+            btn.classList.add('bg-success-500', 'text-white');
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = orig; btn.classList.remove('bg-success-500','text-white'); btn.classList.add('bg-success-50','hover:bg-success-100'); }, 1500);
+        } catch (e) {
+            btn.disabled = false;
+            btn.innerHTML = '✗ Failed';
+            setTimeout(() => { btn.innerHTML = orig; }, 2000);
+            console.error('save note failed', e);
+        }
+    }
+
+    async function sendChat() {
+        if (chatSending) return;
+        const input = document.getElementById('chat-input');
+        const text = input.value.trim();
+        if (!text) return;
+        chatMessages.push({ role: 'user', content: text });
+        input.value = '';
+        chatSending = true;
+        document.getElementById('chat-send-btn').disabled = true;
+        renderChatMessages();
+        try {
+            const r = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ scope: chatScope, messages: chatMessages }),
+            });
+            const body = await r.json();
+            if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+            chatMessages.push({ role: 'assistant', content: body.reply });
+            document.getElementById('chat-status').textContent =
+                `${body.model} · ${body.scope_label}`;
+        } catch (e) {
+            chatMessages.push({
+                role: 'assistant',
+                content: `⚠️ Error: ${e.message || e}\n\n(Check that Gemini API key is set in Settings.)`,
+            });
+        } finally {
+            chatSending = false;
+            document.getElementById('chat-send-btn').disabled = false;
+            renderChatMessages();
+            input.focus();
+        }
+    }
+
+    function clearChat() {
+        chatMessages = [];
+        document.getElementById('chat-status').textContent =
+            'Conversation is not saved — closing the modal clears history.';
+        renderChatEmpty();
+    }
+
+    // ============== INIT ==============
+    document.querySelectorAll('.filter-pill').forEach(p => p.addEventListener('click', () => { currentFilter = p.dataset.filter; renderTable(); }));
+    document.querySelectorAll('.preset-btn').forEach(b => b.addEventListener('click', () => { document.getElementById('naming-template').value = b.dataset.tpl; saveTemplate(); }));
+    document.getElementById('search-input').addEventListener('input', (e) => { currentSearch = e.target.value.trim(); renderTable(); });
+    document.getElementById('columns-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const panel = document.getElementById('columns-panel');
+        if (panel.classList.contains('hidden')) openColumnsPicker();
+        else closeColumnsPicker();
+    });
+    document.getElementById('groupby-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const panel = document.getElementById('groupby-panel');
+        if (panel.classList.contains('hidden')) openGroupByPicker();
+        else closeGroupByPicker();
+    });
+
+    buildTableStructure();
+    setupColumnResize();
+    setupColumnFilters();
+    updateGroupByButtonLabel();
+    loadData();
+
+    // ===== Settings view wiring =====
+    document.getElementById('settings-save-btn')?.addEventListener('click', (e) => saveSettings(e.currentTarget));
+    document.getElementById('settings-reveal-btn')?.addEventListener('click', () => {
+        settingsRevealed = !settingsRevealed;
+        loadSettings();
+    });
+    document.getElementById('test-omada-btn')?.addEventListener('click', testOmada);
+    document.getElementById('test-gemini-btn')?.addEventListener('click', testGemini);
+
+    // ===== Chat modal wiring =====
+    document.getElementById('chat-scope-select')?.addEventListener('change', (e) => {
+        chatScope = e.target.value;
+        // Reset the conversation when switching scope — the system prompt
+        // changes so prior context would be incoherent.
+        if (chatMessages.length > 0) clearChat();
+        updateChatScopeHint();
+        document.getElementById('chat-status').textContent =
+            `Scoped to ${chatScope === 'all' ? 'all clients' : chatScope}`;
+    });
+    document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChat();
+        }
+    });
+    setInterval(() => { if (!document.hidden) loadData(); }, 5 * 60 * 1000);
+    let lastVisibleAt = Date.now();
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) lastVisibleAt = Date.now();
+        else if (Date.now() - lastVisibleAt > 60 * 1000) loadData();
+    });
+
+    // ============ HARMONIZE NAMES (cluster-aware AI alignment) ============
+    let harmonizeData = null;
+    let harmonizeSelections = {};  // mac -> bool
+
+    async function openHarmonize() {
+        const modal = document.getElementById('harmonize-modal');
+        modal.classList.remove('hidden');
+        document.getElementById('harmonize-subtitle').textContent = 'Running cluster analysis with Gemini…';
+        document.getElementById('harmonize-summary').textContent = '—';
+        document.getElementById('harmonize-apply-btn').disabled = true;
+        document.getElementById('harmonize-apply-btn').textContent = 'Apply Changes';
+        document.getElementById('harmonize-body').innerHTML = `
+            <div class="flex flex-col items-center justify-center py-12 text-ink-500">
+                <svg class="animate-spin w-8 h-8 text-brand-500" fill="none" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle>
+                    <path fill="currentColor" class="opacity-75" d="M4 12a8 8 0 018-8v4l4-4-4-4v4a8 8 0 018 8h-4l4 4 4-4h-4a8 8 0 01-8 8v-4l-4 4 4 4v-4a8 8 0 01-8-8z"></path>
+                </svg>
+                <div class="mt-4 text-sm">Grouping devices and asking Gemini to reconcile…</div>
+                <div class="mt-1 text-[12px] text-ink-400">One call per cluster. This can take 10-30 seconds.</div>
+            </div>`;
+
+        try {
+            const r = await fetch('/api/harmonize_preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await r.json();
+            if (!r.ok) {
+                document.getElementById('harmonize-body').innerHTML = `<div class="bg-danger-500/10 border border-danger-500/30 text-danger-600 text-sm px-4 py-3 rounded">⚠ ${esc(data.error || 'Failed to compute harmonization')}</div>`;
+                document.getElementById('harmonize-subtitle').textContent = 'Failed';
+                return;
+            }
+            harmonizeData = data;
+            renderHarmonizeModal(data);
+        } catch (e) {
+            document.getElementById('harmonize-body').innerHTML = `<div class="bg-danger-500/10 border border-danger-500/30 text-danger-600 text-sm px-4 py-3 rounded">⚠ ${esc(e.message)}</div>`;
+            document.getElementById('harmonize-subtitle').textContent = 'Failed';
+        }
+    }
+
+    function closeHarmonize() {
+        document.getElementById('harmonize-modal').classList.add('hidden');
+        harmonizeData = null;
+        harmonizeSelections = {};
+    }
+
+    function renderHarmonizeModal(data) {
+        const clusters = data.clusters || [];
+        const subtitle = document.getElementById('harmonize-subtitle');
+        const body = document.getElementById('harmonize-body');
+
+        if (clusters.length === 0) {
+            subtitle.textContent = 'Nothing to harmonize';
+            body.innerHTML = `<div class="bg-ink-50 border border-ink-200 rounded p-6 text-center">
+                <div class="text-ink-700 text-sm font-medium mb-1">No clusters with 2+ AI-named devices</div>
+                <div class="text-ink-500 text-[12px]">${esc(data.message || 'Run Scan Unidentified first so devices have AI analyses, then come back.')}</div>
+            </div>`;
+            return;
+        }
+
+        const totalChanges = clusters.reduce((s, c) => s + (c.changes_count || 0), 0);
+        subtitle.textContent = `${clusters.length} cluster${clusters.length === 1 ? '' : 's'} · ${totalChanges} proposed change${totalChanges === 1 ? '' : 's'}`;
+
+        // Pre-select all proposed changes
+        harmonizeSelections = {};
+        clusters.forEach(c => c.members.forEach(m => { if (m.changed) harmonizeSelections[m.mac] = true; }));
+
+        body.innerHTML = clusters.map(c => renderHarmonizeCluster(c)).join('');
+
+        // Wire per-device checkboxes
+        body.querySelectorAll('.harmonize-cb').forEach(cb => {
+            cb.addEventListener('change', () => {
+                harmonizeSelections[cb.dataset.mac] = cb.checked;
+                updateHarmonizeApplyButton();
+            });
+        });
+        // Wire per-cluster toggle-all
+        body.querySelectorAll('.cluster-toggle-all').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.dataset.cluster;
+                const cluster = (harmonizeData.clusters || []).find(c => c.key === key);
+                if (!cluster) return;
+                const changedMacs = cluster.members.filter(m => m.changed).map(m => m.mac);
+                const allOn = changedMacs.every(mac => harmonizeSelections[mac]);
+                changedMacs.forEach(mac => { harmonizeSelections[mac] = !allOn; });
+                changedMacs.forEach(mac => {
+                    const cb = body.querySelector(`.harmonize-cb[data-mac="${mac}"]`);
+                    if (cb) cb.checked = harmonizeSelections[mac];
+                });
+                btn.textContent = allOn ? 'Select all' : 'Deselect all';
+                updateHarmonizeApplyButton();
+            });
+        });
+
+        updateHarmonizeApplyButton();
+    }
+
+    function renderHarmonizeCluster(cluster) {
+        if (cluster.error) {
+            return `<div class="border border-danger-500/30 bg-danger-500/5 rounded">
+                <div class="flex items-center justify-between px-4 py-3">
+                    <h3 class="font-medium text-ink-900">${esc(cluster.name)} <span class="text-ink-500 text-[12px] font-normal">· ${cluster.size} devices</span></h3>
+                    <span class="text-danger-600 text-[12px]">⚠ ${esc(cluster.error)}</span>
+                </div>
+            </div>`;
+        }
+        if (cluster.changes_count === 0) {
+            return `<div class="border border-ink-200 bg-ink-50 rounded">
+                <div class="flex items-center justify-between px-4 py-3">
+                    <h3 class="font-medium text-ink-700">${esc(cluster.name)} <span class="text-ink-500 text-[12px] font-normal">· ${cluster.size} devices</span></h3>
+                    <span class="text-success-600 text-[12px]">✓ Already consistent</span>
+                </div>
+            </div>`;
+        }
+        return `<div class="border border-ink-200 rounded overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-ink-200 bg-ink-50">
+                <h3 class="font-medium text-ink-900">${esc(cluster.name)} <span class="text-ink-500 text-[12px] font-normal">· ${cluster.size} devices, ${cluster.changes_count} change${cluster.changes_count === 1 ? '' : 's'}</span></h3>
+                <button data-cluster="${esc(cluster.key)}" class="cluster-toggle-all text-[12px] text-brand-700 hover:underline">Deselect all</button>
+            </div>
+            <table class="w-full text-[13px]">
+                <thead>
+                    <tr class="text-[11px] text-ink-500 uppercase bg-white">
+                        <th class="px-3 py-2 text-left w-8"></th>
+                        <th class="px-3 py-2 text-left">MAC</th>
+                        <th class="px-3 py-2 text-left">Current</th>
+                        <th class="px-3 py-2 text-left">→ Proposed</th>
+                        <th class="px-3 py-2 text-left">Why</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${cluster.members.map(m => {
+                        if (!m.changed) {
+                            return `<tr class="border-t border-ink-100 bg-white opacity-50">
+                                <td class="px-3 py-2"></td>
+                                <td class="px-3 py-2 font-mono text-[11px] text-ink-500">${esc(m.mac)}</td>
+                                <td class="px-3 py-2 text-ink-700">${esc(m.current_short_name)}</td>
+                                <td class="px-3 py-2 text-ink-400 italic">(no change)</td>
+                                <td class="px-3 py-2 text-ink-400 text-[11px]"></td>
+                            </tr>`;
+                        }
+                        return `<tr class="border-t border-ink-100 bg-white">
+                            <td class="px-3 py-2"><input type="checkbox" data-mac="${esc(m.mac)}" class="harmonize-cb w-4 h-4 accent-brand-500" ${harmonizeSelections[m.mac] ? 'checked' : ''}></td>
+                            <td class="px-3 py-2 font-mono text-[11px] text-ink-500">${esc(m.mac)}</td>
+                            <td class="px-3 py-2 text-ink-700">${esc(m.current_short_name)}</td>
+                            <td class="px-3 py-2"><span class="bg-purple-50 text-purple-700 font-medium px-2 py-0.5 rounded text-[12px]">${esc(m.proposed_short_name)}</span></td>
+                            <td class="px-3 py-2 text-ink-500 text-[11px] leading-snug">${esc(m.reasoning || '')}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        </div>`;
+    }
+
+    function updateHarmonizeApplyButton() {
+        const btn = document.getElementById('harmonize-apply-btn');
+        const summary = document.getElementById('harmonize-summary');
+        const selected = Object.values(harmonizeSelections).filter(Boolean).length;
+        const total = Object.keys(harmonizeSelections).length;
+        btn.disabled = selected === 0;
+        btn.textContent = selected === 0 ? 'Apply Changes' : `Apply ${selected} Change${selected === 1 ? '' : 's'}`;
+        summary.textContent = total === 0 ? '—' : `${selected} of ${total} proposed changes selected`;
+    }
+
+    async function applyHarmonize() {
+        const btn = document.getElementById('harmonize-apply-btn');
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Applying…';
+
+        const updates = [];
+        if (harmonizeData) {
+            (harmonizeData.clusters || []).forEach(cluster => {
+                (cluster.members || []).forEach(m => {
+                    if (m.changed && harmonizeSelections[m.mac]) {
+                        updates.push({ mac: m.mac, new_short_name: m.proposed_short_name });
+                    }
+                });
+            });
+        }
+
+        try {
+            const r = await fetch('/api/harmonize_apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ updates })
+            });
+            const body = await r.json();
+            if (!r.ok) {
+                showError(body.error || 'Failed to apply harmonization');
+                btn.disabled = false;
+                btn.textContent = orig;
+                return;
+            }
+            const n = body.applied || 0;
+            closeHarmonize();
+            await loadData();
+            showHarmonizeToast(n);
+            if (body.errors && body.errors.length) {
+                showError(`${body.errors.length} update${body.errors.length === 1 ? '' : 's'} failed: ${body.errors.map(e => e.error).slice(0, 3).join('; ')}`);
+            }
+        } catch (e) {
+            showError('Apply failed: ' + e.message);
+            btn.disabled = false;
+            btn.textContent = orig;
+        }
+    }
+
+    function showHarmonizeToast(n) {
+        if (n === 0) return;
+        const toast = document.createElement('div');
+        toast.className = 'fixed bottom-6 right-6 bg-success-50 border border-success-500/30 text-success-700 px-4 py-3 rounded shadow-lg z-50 max-w-sm';
+        toast.innerHTML = `<div class="flex items-start gap-3">
+            <svg class="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            <div>
+                <div class="font-medium text-sm">${n} short_name${n === 1 ? '' : 's'} updated locally</div>
+                <div class="text-[12px] text-success-700/80 mt-0.5">Click <strong>Sync All Mismatched</strong> to push the new names to Omada.</div>
+            </div>
+        </div>`;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.style.transition = 'opacity 0.5s'; toast.style.opacity = '0'; }, 6000);
+        setTimeout(() => toast.remove(), 6600);
+    }
+</script>
+
+    <!-- ===== Harmonize Names modal ===== -->
+    <div id="harmonize-modal" class="hidden fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-black/40" onclick="closeHarmonize()"></div>
+        <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+            <div class="bg-white rounded-lg shadow-2xl max-w-5xl w-full max-h-[85vh] flex flex-col pointer-events-auto">
+                <div class="flex items-start justify-between px-5 py-4 border-b border-ink-200">
+                    <div>
+                        <h2 class="text-base font-medium text-ink-900 flex items-center gap-2">
+                            <span class="text-purple-500">🪄</span>
+                            <span>Harmonize Names</span>
+                        </h2>
+                        <p id="harmonize-subtitle" class="text-[12px] text-ink-500 mt-0.5">Loading...</p>
+                    </div>
+                    <button onclick="closeHarmonize()" class="text-ink-400 hover:text-ink-900 transition p-1" title="Close">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                <div id="harmonize-body" class="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-ink-50/30">
+                    <div class="text-center text-ink-500 py-8">Loading...</div>
+                </div>
+                <div class="flex items-center justify-between px-5 py-3 border-t border-ink-200 bg-white">
+                    <div class="text-[12px] text-ink-500" id="harmonize-summary">—</div>
+                    <div class="flex gap-2">
+                        <button onclick="closeHarmonize()" class="bg-white border border-ink-300 hover:border-ink-400 text-ink-700 text-sm font-medium px-4 py-1.5 rounded transition">Cancel</button>
+                        <button id="harmonize-apply-btn" onclick="applyHarmonize()" disabled class="bg-purple-500 hover:bg-purple-600 disabled:bg-ink-300 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-1.5 rounded transition">Apply Changes</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Chat modal ===== -->
+    <div id="chat-modal" class="hidden fixed inset-0 z-50">
+        <div class="absolute inset-0 bg-black/40" onclick="closeChat()"></div>
+        <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+            <div class="bg-white rounded-lg shadow-2xl max-w-3xl w-full h-[80vh] flex flex-col pointer-events-auto">
+                <div class="flex items-start justify-between px-5 py-3 border-b border-ink-200">
+                    <div class="flex-1">
+                        <h2 class="text-base font-medium text-ink-900 flex items-center gap-2">
+                            <span>💬</span>
+                            <span>Ask Gemini</span>
+                        </h2>
+                        <div class="mt-1 flex items-center gap-2 text-[12px]">
+                            <span class="text-ink-500">Scope:</span>
+                            <select id="chat-scope-select" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-[12px] text-ink-900 px-2 py-1 rounded transition">
+                                <option value="all">All clients</option>
+                            </select>
+                            <span id="chat-scope-hint" class="text-ink-400"></span>
+                        </div>
+                    </div>
+                    <button onclick="closeChat()" class="text-ink-400 hover:text-ink-900 transition p-1" title="Close">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                <div id="chat-messages" class="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-ink-50/30">
+                    <!-- messages injected here -->
+                </div>
+                <div class="border-t border-ink-200 bg-white p-3">
+                    <div class="flex gap-2">
+                        <textarea id="chat-input" rows="2" placeholder="Ask anything about your network… (Enter sends, Shift+Enter for newline)" class="flex-1 bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-900 px-3 py-2 rounded transition resize-none"></textarea>
+                        <button id="chat-send-btn" onclick="sendChat()" class="bg-brand-500 hover:bg-brand-600 disabled:bg-ink-300 text-white text-sm font-medium px-4 rounded transition self-stretch">Send</button>
+                    </div>
+                    <div class="flex items-center justify-between mt-2 text-[11px] text-ink-500">
+                        <span id="chat-status">Conversation is not saved — closing the modal clears history.</span>
+                        <button onclick="clearChat()" class="hover:text-ink-900 transition">Clear conversation</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

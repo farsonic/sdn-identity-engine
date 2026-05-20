@@ -1,0 +1,110 @@
+# =============================================================================
+# .gitignore for sdn-identity-engine
+# =============================================================================
+# Keeps runtime state, secrets, and developer artifacts out of git history.
+# Once something is committed and pushed, it's effectively permanent — even
+# `git rm` only deletes from current HEAD, the history still has it. Be
+# paranoid here.
+# =============================================================================
+
+# ---- Runtime state — the most important entries ----
+# instance/omada.db contains every API key you've entered via Settings UI
+# (Omada client_secret, Fingerbank, Gemini), plus every device's data and
+# notes. NEVER commit this.
+instance/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---- Secrets ----
+.env
+.env.*
+*.env
+.envrc
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+
+# ---- Backup / archive directories ----
+old/
+older/
+backup/
+backups/
+archive/
+_archive/
+_old/
+*.bak/
+*.old/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Testing & coverage ----
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# ---- IDE / editor ----
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Docker build cache (we don't commit Dockerfile build artifacts) ----
+.docker/
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Local-only files ----
+*.bak
+*.orig
+*.tmp
+*.old
+TODO.local.md
+NOTES.local.md
+audit-image.sh

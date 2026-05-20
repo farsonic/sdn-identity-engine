@@ -1,0 +1,7 @@
+flask
+flask-socketio
+eventlet
+requests
+flask-sqlalchemy
+scapy
+netaddr

@@ -1,0 +1,141 @@
+# =============================================================================
+# .dockerignore — keep secrets, runtime state, and dev clutter OUT of the image
+# =============================================================================
+# Docker copies the entire build context (the directory passed to `docker build`)
+# into the image unless excluded here. Anything in this list is invisible to the
+# build, so credentials in instance/omada.db, .env, or .git history can't leak.
+# =============================================================================
+
+# ---- Runtime state — the most important entries ----
+# The SQLite DB contains every credential the user has saved via the Settings
+# UI (Omada client_secret, Fingerbank key, Gemini key) plus all device data,
+# notes, and AI analyses. NEVER ship this.
+instance/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---- Environment files ----
+# Anything matching .env* is conventionally where developers put secrets.
+.env
+.env.*
+*.env
+.envrc
+
+# ---- Version control history ----
+# `.git/` can leak commit messages, branch names, and any secrets that were
+# ever committed and later removed (the history still has them).
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+.github/
+
+# ---- Editor / IDE state ----
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Python build artifacts ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Testing & coverage ----
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# ---- Docs / reports ----
+docs/_build/
+*.log
+
+# ---- Docker meta ----
+# Don't ship the compose file inside the image — it often contains env-var
+# values that effectively act as credentials.
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile
+.dockerignore
+
+# ---- Backup / archive directories ----
+# Many people keep an `old/` or `backup/` folder with prior versions of
+# their source. Those almost always contain credentials that have since
+# been rotated out of the live code. NEVER ship them.
+old/
+older/
+backup/
+backups/
+archive/
+_archive/
+_old/
+*.bak/
+*.old/
+
+# ---- Dev tooling that shouldn't be in the production image ----
+# The audit script and publishing docs are for the maintainer, not users
+# of the published image. Excluding them also fixes the self-referential
+# false positives where the audit script's own PERSONAL_TERMS list (containing
+# words like "farsonic", "prowse") triggers matches against itself.
+audit-image.sh
+audit-*.sh
+PUBLISHING.md
+PUBLISHING.*
+CONTRIBUTING.md
+docker-compose.snippet.yml
+
+# ---- Backup files ----
+*.bak
+*.orig
+*.tmp
+*.old
+
+# ---- OS junk ----
+.DS_Store
+Icon?
+ehthumbs.db
+
+# ---- README & docs (optional — comment out if you want them in the image) ----
+# README.md
+# LICENSE
+# CHANGELOG.md
