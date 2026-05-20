@@ -9,7 +9,11 @@ A self-hosted dashboard for identifying, naming, and managing every client on yo
 - **All clients in one table** — name, MAC, IP, OS, vendor, AP/switch, DHCP fingerprint, mDNS services
 - **Auto-identification** — DHCP fingerprints captured passively, looked up against Fingerbank, optionally analyzed by Gemini for a full device dossier
 - **Naming policy** — define a template (e.g. `{type}-{vendor}-{lastoctet}`), apply across the fleet, push back to Omada
-- **AI chat** — ask Gemini about your network ("which devices haven't been identified?") or any single device, save the analysis as device notes in one click
+- **Marvis-style AIOps chatbot** — ask questions in plain English and Gemini answers from your *real* event data, not guesses. It calls structured query tools under the hood (find a device, count events, rank top talkers, troubleshoot, roaming history) and shows you which tools it ran. "How many times did my iPad disconnect today?" → it resolves the device, counts the actual events, and answers grounded in the number.
+- **Charts in chat** — when the answer is a ranking, distribution, or trend, the assistant draws an inline chart (top talkers, event-type breakdown, activity over time)
+- **Syslog ingestion + network-health briefing** — receive your Omada controller's syslog, store it, visualize it (timeline, top talkers, event types, all time-windowed), and get an on-demand Marvis-style briefing: top issues, flapping devices, repeated auth failures, root-cause hypotheses, recommended actions
+- **Access-point awareness** — AP MACs in flow logs are resolved to their Omada names (so "rumpus" and "hallway" appear instead of bare MACs) and clearly distinguished from client devices everywhere they show up
+- **Traffic-flow noise control** — Omada's high-volume firewall/flow logging can be dropped at ingest with one toggle, keeping the event store full of meaningful lifecycle events
 - **No upstream router cooperation needed** — sniffs DHCP and mDNS directly from the host's NIC
 
 ## Prerequisites
@@ -118,13 +122,72 @@ Within ~30 seconds the Clients view should populate with every device Omada know
 - **Click any row** to see the full detail: DHCP fingerprint, vendor class, mDNS services, AI analysis
 - **Click the ✨ icon** to run Gemini analysis on a single device
 - **Click 🧠 Scan Unidentified** to AI-analyze every still-unknown device in one batch
-- **Click 💬 Chat** to ask Gemini about your network in natural language
+- **Click 💬 Chat** to ask about your network in natural language — it queries your real event data to answer (see Step 5 for what it can do)
 - **Click 🪄 Harmonize Names** to find inconsistently-named clusters (e.g. several iPhones with different naming conventions) and align them
 - **Click Sync All Mismatched** to push proposed names back to Omada in bulk
 
 The first run will be quiet — DHCP fingerprints take time to accumulate (one per device per lease renewal, typically every few hours to days). mDNS announcements arrive much faster, so Apple/Sonos/Hue/IoT devices will fingerprint within minutes.
 
-## Alternative capture modes
+## Step 5 — Syslog + network health AI (optional)
+
+Feed your Omada controller's syslog to the dashboard to unlock event history and the Marvis-style network-health briefing.
+
+### Enable syslog export on Omada
+
+In the Omada controller UI, find the log/syslog export setting (the exact path varies by version — typically under Settings → Services, or Global/Site → Log Settings). Set:
+
+- **Server IP:** the IP of the host running this dashboard
+- **Server port:** `5514`
+- **Protocol:** UDP
+
+Save. The dashboard listens on UDP/5514 by default (a high port, so it needs no special privileges). With `network_mode: host` it's reachable on the host's IP automatically — no port mapping needed.
+
+### Verify it's flowing
+
+Open the **Syslog / Events** view in the sidebar. Within a minute the status banner should turn green: `Live on UDP/5514 from <controller-ip> · N received · N stored`. Events stream into the table below, colour-coded by severity, with known client MACs clickable to jump to their device row.
+
+If the banner stays amber (`no events yet`), syslog isn't arriving — check the controller's export config and that nothing between it and the host blocks UDP/5514. You can confirm packets reach the host with `tcpdump -i any -n udp port 5514`. (After a container restart the banner reads `N stored · none since restart` if history exists but nothing new has arrived yet — that's normal.)
+
+### Graphs and the time window
+
+The Syslog view shows three live charts, all bounded to a time window you pick (15 min → 7 days) from the selector at the top:
+
+- **Event activity** — a timeline of events per bucket, total vs. traffic-flow split
+- **Top talkers** — busiest devices, resolved to their identified names; access points are badged `AP` and coloured differently so infrastructure stands out from clients
+- **Event types** — the distribution across connect / disconnect / roam / auth / DHCP / flow / other
+
+The window selector drives the AI briefing too, so you can scope analysis to "just the last 15 minutes" when chasing something live or "last 7 days" for a trend.
+
+### Taming traffic-flow volume
+
+Omada's firewall/flow logging is very high-volume and mostly noise for AIOps. The **Drop traffic-flow logs** toggle in the status banner discards those events at ingest (they're counted but not stored), so your event store and the briefing stay focused on meaningful lifecycle events, and the 100,000-row cap buys far more history. It persists across restarts and can also be set with `SYSLOG_DROP_TRAFFIC_FLOW=1`.
+
+### Get a briefing
+
+Click **✨ Analyze network** in the Syslog view. Gemini reviews the selected window of events alongside your device identifications and produces a briefing: an overall health verdict, the top issues worth attention (with the specific devices and likely root causes), security flags (e.g. distinguishing a stale saved password from a brute-force attempt), and a note on what's normal so routine churn doesn't alarm you. Device MACs in the briefing are clickable, and access points are labelled as infrastructure rather than mistaken for chatty clients.
+
+### Ask the chatbot (Marvis-style)
+
+The 💬 **Chat** button (on the Clients view toolbar) opens a conversational assistant that answers from your real event data. Instead of guessing, Gemini calls structured query tools — the modern equivalent of Juniper Marvis's `LIST` / `COUNT` / `STATUSOF` / `TROUBLESHOOT` / `ROAMINGOF` query language — and grounds its answer in what they return. The status line under each reply shows which tools it ran.
+
+Things you can ask:
+
+- *"How many times did my iPad disconnect today?"* — resolves the device, counts the real events, answers with the number
+- *"Which devices are having connectivity issues?"* — ranks devices by problem events (auth failures, disconnects, deauths)
+- *"Chart the top talkers this hour"* — one aggregation call, rendered as a bar chart
+- *"Show event types as a breakdown"* — a doughnut of the distribution
+- *"Troubleshoot the shed AP"* — full diagnostic for a device, by plain-language name
+- *"Show roaming for my laptop over the last 7 days"* — AP-hop sequence and roam count over time (requires the controller to export client roaming events; if none are present, it says so rather than inventing them)
+
+Each chat can be fleet-wide or scoped to a single device (expand a client row first). MACs in answers are clickable, and an analysis can be saved as the device's owner notes in one click.
+
+### A note on what's queryable
+
+The chatbot and graphs reason over whatever your controller actually exports. Many Omada setups send firewall/flow logs heavily but little else — in that case you'll see lots of `traffic_flow` and `other`, and relatively few connect/roam/auth events. To get the richest AIOps experience, enable the controller's client and WLAN event logging (connect, disconnect, roaming, auth) in its syslog export settings. The `/api/aps` endpoint (`curl -s http://YOUR-HOST:8082/api/aps`) shows the AP MAC→name map the app uses to resolve infrastructure; an empty result there means the controller's device list wasn't reachable.
+
+Storage is bounded: the newest 100,000 events are kept (configurable via `SYSLOG_MAX_ROWS`), oldest pruned beyond that. Set `SYSLOG_ENABLED=0` to turn ingestion off entirely.
+
+
 
 ### TZSP forwarding (when host networking isn't an option)
 
@@ -210,6 +273,20 @@ Your SQLite database in `./instance/` persists across upgrades, so all your save
 - API keys you enter via the Settings UI are stored locally only, never sent anywhere except to the corresponding service when needed
 - Gemini API calls send device metadata (DHCP fingerprint, mDNS service list, hostname, OUI, owner notes) to Google. Don't enter sensitive info in owner notes if this matters to you
 - No telemetry, no phone-home, no analytics
+
+## Changelog
+
+### 0.2.0
+- **Marvis-style tool-using chatbot** — Gemini now answers from real event data via structured query tools (find device, count, list, rank, troubleshoot, roaming, aggregate) instead of guessing, and shows which tools it ran
+- **Charts in chat** — ranked, distribution, and trend answers render as inline charts
+- **Syslog graphs** — event-activity timeline, top talkers, and event-type breakdown, all time-windowed (15 min → 7 days), with the window also driving the AI briefing
+- **Access-point name resolution** — AP MACs from flow logs resolve to their Omada names across graphs, briefing, and chat, and are clearly marked as infrastructure (new `/api/aps` diagnostic endpoint)
+- **Roaming over time** — `ROAMINGOF`-style AP-hop history and roam counts for a device
+- **Drop traffic-flow toggle** — discard high-volume firewall/flow logs at ingest to keep the event store focused on lifecycle events
+- Fixed flow-log parsing to attribute events to the client (`MAC SRC`) rather than the AP, and a JSON-serialization crash on events with null fields
+
+### 0.1.0
+- Initial release: client identification (DHCP fingerprinting, mDNS, Fingerbank, Gemini), naming policy, syslog ingestion, and the on-demand network-health briefing
 
 ## License
 
