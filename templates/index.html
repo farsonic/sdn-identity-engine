@@ -2662,6 +2662,17 @@ PROPOSED:     ${esc(proposed)}</pre>
         reconnect: '🔄 Reconnect', roamed: '↔️ Roam', roaming: '↔️ Roam',
         auth_failed: '⚠️ Auth fail', deauth: '⛔ Deauth', dhcp: '📍 DHCP',
         online: '🟢 Online', offline: '🔴 Offline', other: '· Other',
+        // Webhook / controller notifications
+        device_connected: '🟢 Device up', device_disconnected: '🔴 Device down',
+        wan_down: '🌐 WAN down', wan_backup: '🌐 WAN backup', wan_detection: '🌐 WAN check',
+        wan_pppoe_failed: '🌐 PPPoE fail', rogue_dhcp: '🚨 Rogue DHCP',
+        dhcp_pool_exhausted: '⚠️ DHCP pool full', ip_conflict: '⚠️ IP conflict',
+        arp_conflict: '⚠️ ARP conflict', loop_detected: '🔁 Loop', storm_detected: '🌩️ Storm',
+        port_blocked: '⛔ Port blocked', stp_topology_changed: '🌲 STP change',
+        attack_detected: '🛡️ Attack', ap_isolated: '🔌 AP isolated',
+        config_desync: '⚙️ Config desync', monitor_link_down: '🔗 Link down',
+        monitor_link_error: '🔗 Link error', cpu_alert: '🔥 CPU alert',
+        memory_alert: '🔥 Memory alert', notification: '🔔 Notification',
     };
 
     async function loadSyslog() {
@@ -2853,12 +2864,14 @@ PROPOSED:     ${esc(proposed)}</pre>
         const dropOn = !!s.drop_traffic_flow;
         const droppedNote = (s.dropped_flows || 0) > 0
             ? ` · <span class="text-ink-400">${s.dropped_flows.toLocaleString()} flows dropped</span>` : '';
+        const webhookNote = (s.webhooks_received || 0) > 0
+            ? ` · <span class="text-info-500">🔔 ${s.webhooks_received.toLocaleString()} webhooks</span>` : '';
         const toggle = `
             <label class="flex items-center gap-1.5 text-[12px] text-ink-600 cursor-pointer ml-auto whitespace-nowrap" title="Drop high-volume firewall/flow logs at ingest; keep only lifecycle events">
                 <input type="checkbox" id="drop-flow-toggle" ${dropOn ? 'checked' : ''} onchange="toggleDropFlow(this.checked)" class="accent-brand-500">
                 Drop traffic-flow logs${droppedNote}
             </label>`;
-        el.innerHTML = `<div class="${bg} border text-[12px] px-3 py-2 rounded flex items-center gap-2"><span class="dot ${dot}"></span>${esc(msg)}${toggle}</div>`;
+        el.innerHTML = `<div class="${bg} border text-[12px] px-3 py-2 rounded flex items-center gap-2"><span class="dot ${dot}"></span>${esc(msg)}<span>${webhookNote}</span>${toggle}</div>`;
     }
 
     async function toggleDropFlow(enabled) {
@@ -2873,13 +2886,16 @@ PROPOSED:     ${esc(proposed)}</pre>
         } catch (e) { /* non-fatal */ }
     }
 
+    let _syslogEvents = [];   // cache for row-detail expansion
+
     function renderSyslogTable(events) {
         const wrap = document.getElementById('syslog-table-wrap');
+        _syslogEvents = events || [];
         if (!events.length) {
             wrap.innerHTML = '<div class="text-center text-ink-500 text-[13px] py-12">No events match the current filters.</div>';
             return;
         }
-        const rows = events.map(e => {
+        const rows = events.map((e, idx) => {
             const tone = SEVERITY_TONE[(e.severity || '').toLowerCase()] || 'text-ink-600';
             const evLabel = EVENT_TYPE_LABELS[e.event_type] || esc(e.event_type || '—');
             // Make a known client MAC clickable → jump to its row
@@ -2890,14 +2906,15 @@ PROPOSED:     ${esc(proposed)}</pre>
                     ? `<button class="syslog-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted" data-mac="${esc(e.client_mac)}">${esc(e.client_mac)}</button>`
                     : `<span class="font-mono text-ink-500">${esc(e.client_mac)}</span>`;
             }
-            return `<tr class="border-b border-ink-100 hover:bg-ink-50/50">
+            return `<tr class="syslog-row border-b border-ink-100 hover:bg-ink-50/50 cursor-pointer" data-idx="${idx}" title="Click to see full payload">
                 <td class="px-2 py-1.5 text-[11px] text-ink-500 whitespace-nowrap font-mono">${esc(formatDateShort(e.received_at))}</td>
                 <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${evLabel}</td>
                 <td class="px-2 py-1.5 text-[11px] ${tone} uppercase whitespace-nowrap">${esc(e.severity || '—')}</td>
                 <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${macCell}</td>
                 <td class="px-2 py-1.5 text-[12px] text-ink-500 whitespace-nowrap">${esc(e.ssid || '—')}</td>
                 <td class="px-2 py-1.5 text-[12px] text-ink-800">${esc(e.message || '')}</td>
-            </tr>`;
+            </tr>
+            <tr class="syslog-detail hidden" data-detail="${idx}"><td colspan="6" class="px-2 py-0 bg-ink-50/60"></td></tr>`;
         }).join('');
         wrap.innerHTML = `
             <table class="w-full text-sm">
@@ -2913,11 +2930,56 @@ PROPOSED:     ${esc(proposed)}</pre>
                 </thead>
                 <tbody>${rows}</tbody>
             </table>
-            <div class="text-[11px] text-ink-400 mt-3">${events.length} events shown (newest first)</div>`;
-        // Wire MAC links
+            <div class="text-[11px] text-ink-400 mt-3">${events.length} events shown (newest first) · click a row for full payload</div>`;
+        // Wire MAC links (stop propagation so they don't also toggle the row)
         wrap.querySelectorAll('.syslog-mac-link').forEach(btn => {
-            btn.addEventListener('click', () => jumpToDevice(btn.dataset.mac));
+            btn.addEventListener('click', (ev) => { ev.stopPropagation(); jumpToDevice(btn.dataset.mac); });
         });
+        // Wire row expansion
+        wrap.querySelectorAll('.syslog-row').forEach(row => {
+            row.addEventListener('click', () => toggleSyslogDetail(parseInt(row.dataset.idx, 10)));
+        });
+    }
+
+    function toggleSyslogDetail(idx) {
+        const detailRow = document.querySelector(`tr.syslog-detail[data-detail="${idx}"]`);
+        if (!detailRow) return;
+        const cell = detailRow.querySelector('td');
+        if (!detailRow.classList.contains('hidden')) {
+            detailRow.classList.add('hidden');
+            cell.innerHTML = '';
+            return;
+        }
+        const e = _syslogEvents[idx];
+        // Pretty-print raw if it's JSON
+        let rawDisplay = e.raw || '(no raw payload stored)';
+        try {
+            rawDisplay = JSON.stringify(JSON.parse(e.raw), null, 2);
+        } catch (_) { /* not JSON, show as-is */ }
+        const field = (label, val) => val
+            ? `<div class="flex gap-2"><span class="text-ink-400 w-24 shrink-0">${label}</span><span class="text-ink-800 font-mono break-all">${esc(String(val))}</span></div>` : '';
+        cell.innerHTML = `
+            <div class="py-3 text-[11px] space-y-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
+                    ${field('Event type', e.event_type)}
+                    ${field('Severity', e.severity)}
+                    ${field('Source IP', e.source_ip)}
+                    ${field('Tag', e.tag)}
+                    ${field('Category', e.category)}
+                    ${field('Facility', e.facility)}
+                    ${field('Client MAC', e.client_mac)}
+                    ${field('Client IP', e.client_ip)}
+                    ${field('AP / device', e.device_name)}
+                    ${field('SSID', e.ssid)}
+                    ${field('Hostname', e.hostname)}
+                    ${field('Received', e.received_at)}
+                </div>
+                <div>
+                    <div class="text-ink-400 mb-1">Raw payload</div>
+                    <pre class="bg-white border border-ink-200 rounded p-2 overflow-x-auto text-[10px] leading-relaxed text-ink-800 whitespace-pre-wrap break-all max-h-64">${esc(rawDisplay)}</pre>
+                </div>
+            </div>`;
+        detailRow.classList.remove('hidden');
     }
 
     async function analyzeSyslog() {

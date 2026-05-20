@@ -86,6 +86,9 @@ SYSLOG_MAX_ROWS = int(os.environ.get("SYSLOG_MAX_ROWS", "100000"))
 # (connect/roam/auth/DHCP/AP-state) and the row cap buys far more history.
 # Toggle live from the Syslog view; persisted in GlobalSetting.
 SYSLOG_DROP_TRAFFIC_FLOW = os.environ.get("SYSLOG_DROP_TRAFFIC_FLOW", "0") == "1"
+# Optional shared secret for the webhook receiver. If set, Omada must POST to
+# /api/webhook/<token>. If empty, the endpoint is open (LAN-trusted).
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 
 if not OMADA_VERIFY_TLS:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -494,6 +497,7 @@ else:
 # --- Syslog ingestion -------------------------------------------------------
 _syslog_event_count = 0   # cheap in-process counter to throttle prune frequency
 _syslog_dropped_count = 0  # traffic_flow events dropped at ingest this process
+_webhook_count = 0  # webhook notifications received this process
 # Live, mutable copy of the drop-flow flag. Seeded from env; the DB value (if
 # set) overrides it at startup via reload_app_config(); the UI toggle updates
 # both this and the DB.
@@ -1893,6 +1897,7 @@ def syslog_status():
         "by_type": by_type,
         "drop_traffic_flow": _drop_traffic_flow,
         "dropped_flows": _syslog_dropped_count,
+        "webhooks_received": _webhook_count,
     })
 
 
@@ -1929,6 +1934,170 @@ def api_aps():
                         "cache_age_seconds": round(time.time() - _ap_cache_ts, 1)})
     except Exception as exc:
         return jsonify({"error": str(exc), "count": 0, "aps": {}}), 502
+
+
+# ---------------------------------------------------------------------------
+# Webhook receiver — Omada controller notifications (Logs → Notifications →
+# Webhook). These carry the real network-health events that syslog flow logs
+# don't: device disconnected, WAN down, rogue DHCP, ARP/IP conflict, STP
+# topology change, loop/storm detection, attack detection, etc. They land in
+# the same SyslogEvent table so graphs / briefing / chatbot pick them up.
+# ---------------------------------------------------------------------------
+
+# Map keywords found in a webhook's text to our normalized event_type. Ordered
+# most-specific first; first hit wins. Kept tolerant because Omada's exact JSON
+# field names aren't documented — we match against the whole flattened text.
+_WEBHOOK_EVENT_MAP = [
+    ("rogue dhcp", "rogue_dhcp"),
+    ("dhcp lease pool", "dhcp_pool_exhausted"),
+    ("ip conflict", "ip_conflict"),
+    ("arp conflict", "arp_conflict"),
+    ("wan is down", "wan_down"),
+    ("wan link backup", "wan_backup"),
+    ("wan online detection", "wan_detection"),
+    ("pppoe", "wan_pppoe_failed"),
+    ("detected loop", "loop_detected"),
+    ("loop detected", "loop_detected"),
+    ("loop protect", "loop_detected"),
+    ("storm", "storm_detected"),
+    ("port blocked", "port_blocked"),
+    ("stp topology", "stp_topology_changed"),
+    ("detected attack", "attack_detected"),
+    ("attack", "attack_detected"),
+    ("flood attack", "attack_detected"),
+    ("large ping", "attack_detected"),
+    ("isolated", "ap_isolated"),
+    ("desynchronized", "config_desync"),
+    ("link down", "monitor_link_down"),
+    ("link error", "monitor_link_error"),
+    ("disconnected", "device_disconnected"),
+    ("connected", "device_connected"),
+    ("online", "online"),
+    ("offline", "offline"),
+    ("cpu utilization", "cpu_alert"),
+    ("memory utilization", "memory_alert"),
+]
+
+
+def _classify_webhook(text: str) -> str:
+    t = (text or "").lower()
+    for needle, etype in _WEBHOOK_EVENT_MAP:
+        if needle in t:
+            return etype
+    return "notification"
+
+
+def _flatten_webhook(payload) -> str:
+    """Flatten a webhook payload (dict / list / str) into a single searchable
+    string, so classification + MAC/IP extraction work regardless of the exact
+    schema Omada uses."""
+    parts = []
+    def walk(v):
+        if isinstance(v, dict):
+            for k, vv in v.items():
+                parts.append(str(k))
+                walk(vv)
+        elif isinstance(v, list):
+            for vv in v:
+                walk(vv)
+        elif v is not None:
+            parts.append(str(v))
+    walk(payload)
+    return " ".join(parts)
+
+
+@app.route("/api/webhook", methods=["POST"])
+@app.route("/api/webhook/<token>", methods=["POST"])
+def webhook_receiver(token: str = ""):
+    """Receive Omada controller webhook notifications. Accepts any JSON (or
+    form/text), stores it verbatim in raw + a classified event in SyslogEvent,
+    and always returns 200 so the controller doesn't retry-storm.
+
+    Configure in Omada: Logs → Notifications → enable Webhook, payload template
+    'Omada', URL http://THIS-HOST:8082/api/webhook (append /<token> if you set
+    WEBHOOK_TOKEN). Enable the specific events you care about."""
+    # Parse the body as forgivingly as possible.
+    payload = None
+    if request.is_json:
+        payload = request.get_json(silent=True)
+    if payload is None:
+        raw_text = request.get_data(as_text=True) or ""
+        try:
+            payload = json.loads(raw_text) if raw_text.strip() else {}
+        except json.JSONDecodeError:
+            payload = {"text": raw_text}
+
+    # Auth: if WEBHOOK_TOKEN is set, accept it from any of the three places
+    # Omada/clients may carry it — the URL path segment (/api/webhook/<token>),
+    # the "access_token" HTTP header (Omada sends this natively), or the
+    # "shardSecret" body field. Any match passes.
+    if WEBHOOK_TOKEN:
+        header_token = (request.headers.get("access_token")
+                        or request.headers.get("Access-Token") or "")
+        shard = payload.get("shardSecret") if isinstance(payload, dict) else None
+        if WEBHOOK_TOKEN not in (token, header_token, shard):
+            log.warning("Webhook rejected: bad/missing token from %s", request.remote_addr)
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    raw_json = json.dumps(payload, ensure_ascii=False)[:4000]
+
+    # Omada's real event content lives in a "text" array; "description" is
+    # always the boilerplate "This is a webhook message...". Pull the text[]
+    # content out first — it's what we classify and summarize on.
+    omada_text = ""
+    if isinstance(payload, dict):
+        t = payload.get("text")
+        if isinstance(t, list):
+            omada_text = " ".join(str(x) for x in t if x)
+        elif isinstance(t, str):
+            omada_text = t
+
+    flat = _flatten_webhook(payload)
+    # Classify on the meaningful text if present, else the whole flattened body.
+    event_type = _classify_webhook(omada_text or flat)
+    from datetime import datetime, timezone
+
+    # Best-effort field extraction (schema-tolerant).
+    search_text = omada_text or flat
+    mac_m = re.search(r"\b([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b", search_text)
+    ip_m = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", search_text)
+    client_mac = mac_m.group(0).upper().replace(":", "-") if mac_m else None
+    # Human-readable summary: prefer the real text[] content, then explicit
+    # message-ish fields, then a trimmed flattening. Never the boilerplate
+    # "description" alone.
+    summary = omada_text or None
+    if not summary and isinstance(payload, dict):
+        for key in ("msg", "message", "content", "Msg", "operation"):
+            if payload.get(key):
+                summary = str(payload[key]); break
+        # Fall back to description only if nothing better exists.
+        if not summary and payload.get("description"):
+            summary = str(payload["description"])
+    if not summary:
+        summary = flat[:300]
+
+    event = {
+        "received_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_ip": request.remote_addr,
+        "pri": None, "facility": "webhook", "severity": "notice",
+        "syslog_ts": None, "hostname": None, "tag": "webhook",
+        "message": summary[:2000],
+        "category": "Notification",
+        "event_type": event_type,
+        "client_mac": client_mac,
+        "client_ip": ip_m.group(0) if ip_m else None,
+        "ssid": None, "channel": None, "device_name": None,
+        "raw": raw_json,
+    }
+    try:
+        _store_syslog_event(event)
+    except Exception:
+        log.exception("Failed to store webhook event")
+        # Still 200 — we don't want Omada retrying on our storage hiccup.
+    global _webhook_count
+    _webhook_count += 1
+    log.info("Webhook received from %s → %s", request.remote_addr, event_type)
+    return jsonify({"ok": True, "event_type": event_type})
 
 
 @app.route("/api/syslog/events")
@@ -1976,6 +2145,10 @@ def syslog_events():
             "channel": r.channel,
             "hostname": r.hostname,
             "message": r.message,
+            "device_name": r.device_name,
+            "source_ip": r.source_ip,
+            "tag": r.tag,
+            "raw": r.raw,
         } for r in rows],
     })
 

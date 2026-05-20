@@ -15,6 +15,7 @@ stdlib socket module (syslog is just UDP text).
 from __future__ import annotations
 
 import logging
+import json
 import re
 import socket
 import threading
@@ -181,6 +182,28 @@ def parse_syslog(raw: str, source_ip: str) -> dict:
 
     body = event["message"] or ""
 
+    # Some Omada controller events arrive over syslog as a JSON body (often
+    # prefixed with "- "), e.g. {"details":{},"operation":"... configured
+    # successfully."}. Unpack it so the readable text — not the raw JSON —
+    # becomes the message, and classify as a controller "notification".
+    json_start = body.find("{")
+    if json_start != -1 and body.rstrip().endswith("}"):
+        candidate = body[json_start:].strip()
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+        if isinstance(obj, dict):
+            op = obj.get("operation") or obj.get("description") or obj.get("msg")
+            if op:
+                event["message"] = str(op)[:2000]
+                # Pull a client MAC out of the operation text if present.
+                mm = _MAC_RE.search(str(op))
+                if mm:
+                    event["client_mac"] = mm.group(0).upper().replace(":", "-")
+                event["event_type"] = "notification"
+                return event
+
     # Bracketed Omada category, e.g. "[Clients]".
     cm = _CATEGORY_RE.search(body)
     if cm:
@@ -210,6 +233,14 @@ def parse_syslog(raw: str, source_ip: str) -> dict:
                 event["dest_port"] = int(dpt.group(1))
             except ValueError:
                 pass
+        return event
+
+    # AP-MAC-only flow record (some batched lines carry just "AP MAC=" with no
+    # "MAC SRC="). Still a flow log — put the AP in device_name, NOT client_mac,
+    # so we never misattribute the AP as a chatty client.
+    if flow_ap:
+        event["device_name"] = flow_ap.group(1).upper().replace(":", "-")
+        event["event_type"] = "traffic_flow"
         return event
 
     macs = _MAC_RE.findall(body)
@@ -328,11 +359,16 @@ class SyslogCapture:
             self.messages_received += 1
             self.last_source_ip = addr[0]
             self.last_message_at = _iso_now()
-            # A single datagram may contain multiple newline-separated messages.
+            # A single datagram often carries one syslog-framed first line
+            # followed by bare continuation records (Omada batches flow logs
+            # this way). Split on newlines; skip anything with no real content
+            # so trailing nulls / stray bytes never become empty "other" rows.
             text = data.decode("utf-8", errors="replace")
             for line in text.splitlines():
-                line = line.strip()
-                if not line:
+                line = line.strip().strip("\x00").strip()
+                # Require at least one alphanumeric char — filters blank lines,
+                # lone punctuation, and decode-replacement artifacts.
+                if not line or not any(c.isalnum() for c in line):
                     continue
                 try:
                     event = parse_syslog(line, addr[0])

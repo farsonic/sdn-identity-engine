@@ -181,6 +181,14 @@ Things you can ask:
 
 Each chat can be fleet-wide or scoped to a single device (expand a client row first). MACs in answers are clickable, and an analysis can be saved as the device's owner notes in one click.
 
+### Network-health events via webhooks
+
+Omada's syslog stream carries traffic flows and DHCP, but the real operational events — device disconnected, WAN down, rogue DHCP, IP/ARP conflicts, STP topology changes, loops, storms, attack detection — are delivered through the controller's **webhook/notification** channel, not syslog. Point those at the built-in receiver to fold them into the same event store.
+
+In Omada: Logs → Notifications → enable **Webhook**, set Payload Template to **"Omada"** (not Google Chat), URL `http://YOUR-HOST:8082/api/webhook`, and enable the specific events you care about. To require a secret, set `WEBHOOK_TOKEN` in the environment — the app accepts it from Omada's `access_token` header, the `shardSecret` body field, or a `/api/webhook/<token>` URL path.
+
+Webhook events classify into the same vocabulary as syslog (device_disconnected, wan_down, rogue_dhcp, etc.), so they show up in the graphs, feed the AI briefing, and are queryable by the chatbot. The status banner shows a 🔔 webhook counter, and clicking any event row reveals its full raw payload. Tip: the "Global Logs were sent automatically" notification is just log-forwarding chatter — disable that one in Omada to keep the feed focused on real events.
+
 ### A note on what's queryable
 
 The chatbot and graphs reason over whatever your controller actually exports. Many Omada setups send firewall/flow logs heavily but little else — in that case you'll see lots of `traffic_flow` and `other`, and relatively few connect/roam/auth events. To get the richest AIOps experience, enable the controller's client and WLAN event logging (connect, disconnect, roaming, auth) in its syslog export settings. The `/api/aps` endpoint (`curl -s http://YOUR-HOST:8082/api/aps`) shows the AP MAC→name map the app uses to resolve infrastructure; an empty result there means the controller's device list wasn't reachable.
@@ -275,6 +283,13 @@ Your SQLite database in `./instance/` persists across upgrades, so all your save
 - No telemetry, no phone-home, no analytics
 
 ## Changelog
+
+### 0.2.1
+- **Webhook receiver** (`POST /api/webhook`, optional `/api/webhook/<token>`) — ingests Omada controller notifications (device disconnected, WAN down, rogue DHCP, IP/ARP conflict, STP changes, loops, storms, attacks, link/CPU/memory alerts) into the same event store, so they appear in graphs, the briefing, and the chatbot. Configure in Omada: Logs → Notifications → enable Webhook, payload template "Omada", URL `http://THIS-HOST:8082/api/webhook`.
+- **Three-way webhook auth** — when `WEBHOOK_TOKEN` is set, the token is accepted from the `access_token` header (Omada's native method), the `shardSecret` body field, or the URL path.
+- **Webhook counter** in the syslog status banner.
+- **Expandable event rows** — click any event in the table to see all parsed fields plus the full raw payload (pretty-printed if JSON).
+- Syslog parser now unpacks JSON-bodied controller events (e.g. `{"operation":"..."}`) into readable messages instead of storing raw JSON, and hardened against empty/control-only continuation fragments.
 
 ### 0.2.0
 - **Marvis-style tool-using chatbot** — Gemini now answers from real event data via structured query tools (find device, count, list, rank, troubleshoot, roaming, aggregate) instead of guessing, and shows which tools it ran
