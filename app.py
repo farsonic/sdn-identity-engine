@@ -73,6 +73,20 @@ CAPTURE_MODE = os.environ.get("CAPTURE_MODE", "tzsp").lower().strip()
 # usually fine on a single-NIC container in host-network mode.
 CAPTURE_INTERFACE = os.environ.get("CAPTURE_INTERFACE", "").strip()
 
+# Syslog ingestion. Omada (or any device) can forward syslog here for
+# storage + AI analysis. Default port 5514 (high port, no privilege needed).
+# Set SYSLOG_ENABLED=0 to disable. SYSLOG_MAX_ROWS caps stored events; the
+# oldest are pruned past this count to bound disk use (syslog is high-volume).
+SYSLOG_ENABLED = os.environ.get("SYSLOG_ENABLED", "1") == "1"
+SYSLOG_PORT = int(os.environ.get("SYSLOG_PORT", "5514"))
+SYSLOG_MAX_ROWS = int(os.environ.get("SYSLOG_MAX_ROWS", "100000"))
+# Omada firewall/flow logging is extremely high-volume and mostly noise for
+# AIOps. With this set, traffic_flow events are dropped at ingest (counted but
+# not stored), so the table stays full of meaningful lifecycle events
+# (connect/roam/auth/DHCP/AP-state) and the row cap buys far more history.
+# Toggle live from the Syslog view; persisted in GlobalSetting.
+SYSLOG_DROP_TRAFFIC_FLOW = os.environ.get("SYSLOG_DROP_TRAFFIC_FLOW", "0") == "1"
+
 if not OMADA_VERIFY_TLS:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -105,6 +119,35 @@ class GlobalSetting(db.Model):
     omada_client_secret = db.Column(db.String(256))
     gemini_api_key = db.Column(db.String(256))
     fingerbank_api_key = db.Column(db.String(256))
+    # Shared bearer token the Android companion app presented on /api/telemetry.
+    # Retained as a column for backward compat with existing DBs; no longer used.
+    telemetry_token = db.Column(db.String(128))
+    # When set, traffic_flow (firewall/flow) syslog events are dropped at ingest.
+    drop_traffic_flow = db.Column(db.Boolean, default=False)
+
+
+class SyslogEvent(db.Model):
+    """A parsed syslog message forwarded by the Omada controller (or any
+    syslog source). High-volume — pruned to SYSLOG_MAX_ROWS by age. Indexed
+    on received_at (timeline queries) and client_mac (per-device correlation)."""
+    id = db.Column(db.Integer, primary_key=True)
+    received_at = db.Column(db.String(32), index=True)  # when we got it (ISO UTC)
+    source_ip = db.Column(db.String(45))                # syslog sender
+    pri = db.Column(db.Integer)
+    facility = db.Column(db.String(16))
+    severity = db.Column(db.String(16), index=True)
+    syslog_ts = db.Column(db.String(48))                # timestamp from the message
+    hostname = db.Column(db.String(64))
+    tag = db.Column(db.String(64))
+    message = db.Column(db.Text)
+    category = db.Column(db.String(48))                 # Omada [bracketed] category
+    event_type = db.Column(db.String(32), index=True)   # normalized classification
+    client_mac = db.Column(db.String(17), index=True)   # extracted, dash-upper
+    client_ip = db.Column(db.String(45))
+    ssid = db.Column(db.String(64))
+    channel = db.Column(db.Integer)
+    device_name = db.Column(db.String(64))
+    raw = db.Column(db.Text)
 
 
 class DeviceSetting(db.Model):
@@ -156,6 +199,7 @@ def _migrate_sqlite_schema() -> None:
             ("omada_client_secret", "VARCHAR(256)"),
             ("gemini_api_key", "VARCHAR(256)"),
             ("fingerbank_api_key", "VARCHAR(256)"),
+            ("drop_traffic_flow", "BOOLEAN"),
         ],
     }
 
@@ -447,6 +491,97 @@ else:
     log.info("Capture disabled via DHCP_CAPTURE_ENABLED=0")
 
 
+# --- Syslog ingestion -------------------------------------------------------
+_syslog_event_count = 0   # cheap in-process counter to throttle prune frequency
+_syslog_dropped_count = 0  # traffic_flow events dropped at ingest this process
+# Live, mutable copy of the drop-flow flag. Seeded from env; the DB value (if
+# set) overrides it at startup via reload_app_config(); the UI toggle updates
+# both this and the DB.
+_drop_traffic_flow = SYSLOG_DROP_TRAFFIC_FLOW
+
+# DB override at startup: if a GlobalSetting row has drop_traffic_flow set,
+# honour it over the env default.
+with app.app_context():
+    _gs_row = GlobalSetting.query.first()
+    if _gs_row is not None and _gs_row.drop_traffic_flow is not None:
+        _drop_traffic_flow = bool(_gs_row.drop_traffic_flow)
+        if _drop_traffic_flow:
+            log.info("Syslog: dropping traffic_flow events at ingest (from DB setting)")
+
+
+def _store_syslog_event(event: dict) -> None:
+    """Callback for the syslog listener thread. Persists a parsed event and
+    periodically prunes old rows. Also bumps the matched client's last_seen
+    so syslog activity keeps a device 'fresh' between Omada polls.
+
+    If drop-traffic-flow is enabled, firewall/flow events are counted but not
+    stored — keeps the table full of meaningful lifecycle events."""
+    global _syslog_event_count, _syslog_dropped_count
+    if _drop_traffic_flow and event.get("event_type") == "traffic_flow":
+        _syslog_dropped_count += 1
+        return
+    with app.app_context():
+        row = SyslogEvent(
+            received_at=event.get("received_at"),
+            source_ip=event.get("source_ip"),
+            pri=event.get("pri"),
+            facility=event.get("facility"),
+            severity=event.get("severity"),
+            syslog_ts=event.get("syslog_ts"),
+            hostname=event.get("hostname"),
+            tag=event.get("tag"),
+            message=event.get("message"),
+            category=event.get("category"),
+            event_type=event.get("event_type"),
+            client_mac=event.get("client_mac"),
+            client_ip=event.get("client_ip"),
+            ssid=event.get("ssid"),
+            channel=event.get("channel"),
+            device_name=event.get("device_name"),
+            raw=event.get("raw"),
+        )
+        db.session.add(row)
+
+        # Correlate to a known device and bump last_seen.
+        mac = event.get("client_mac")
+        if mac:
+            setting = db.session.get(DeviceSetting, mac)
+            if setting is not None:
+                setting.last_seen = event.get("received_at")
+        db.session.commit()
+
+        _syslog_event_count += 1
+        # Prune every 500 events rather than on every insert.
+        if _syslog_event_count % 500 == 0:
+            _prune_syslog()
+
+
+def _prune_syslog() -> None:
+    """Keep only the most recent SYSLOG_MAX_ROWS rows."""
+    with app.app_context():
+        total = db.session.query(SyslogEvent.id).count()
+        if total <= SYSLOG_MAX_ROWS:
+            return
+        excess = total - SYSLOG_MAX_ROWS
+        old_ids = [r.id for r in SyslogEvent.query
+                   .order_by(SyslogEvent.id.asc()).limit(excess).all()]
+        if old_ids:
+            SyslogEvent.query.filter(SyslogEvent.id.in_(old_ids)).delete(
+                synchronize_session=False)
+            db.session.commit()
+            log.info("Pruned %d old syslog rows (cap=%d)", len(old_ids), SYSLOG_MAX_ROWS)
+
+
+from syslog_capture import SyslogCapture  # noqa: E402
+
+syslog_capture = SyslogCapture(SYSLOG_PORT, _store_syslog_event)
+if SYSLOG_ENABLED:
+    syslog_capture.start()
+    log.info("Syslog ingestion enabled (UDP/%d)", SYSLOG_PORT)
+else:
+    log.info("Syslog ingestion disabled via SYSLOG_ENABLED=0")
+
+
 def get_setting(mac: str) -> DeviceSetting | None:
     """SQLAlchemy 2.x-friendly lookup."""
     return db.session.get(DeviceSetting, mac)
@@ -643,6 +778,24 @@ class OmadaClient:
             raise RuntimeError(f"list_clients failed: {body}")
         return body["result"].get("data", [])
 
+    def list_aps(self) -> list[dict]:
+        """List the site's network devices (APs, switches, gateways). Omada's
+        Open API exposes these under /devices. Returns whatever the controller
+        gives; callers pick out mac/name/type."""
+        self._ensure_site()
+        body = self._request(
+            "GET",
+            f"/sites/{self.site_id}/devices",
+            params={"page": 1, "pageSize": 1000},
+        )
+        if body.get("errorCode") != 0:
+            raise RuntimeError(f"list_aps failed: {body}")
+        result = body.get("result", {})
+        # Some controllers return a paged {data: [...]}, others a bare list.
+        if isinstance(result, dict):
+            return result.get("data", [])
+        return result if isinstance(result, list) else []
+
     def rename_client(self, mac: str, name: str) -> dict:
         """Best guess at the Open API rename path. Verify at /doc.html on your controller."""
         self._ensure_site()
@@ -672,8 +825,52 @@ omada = OmadaClient()
 
 
 # ---------------------------------------------------------------------------
-# Name template
+# AP name cache — maps an AP MAC (dash-upper) to its Omada-configured name.
+# Flow logs reference APs by MAC; this lets us show "Garage AP" instead of a
+# bare MAC in graphs, the briefing, and the chatbot. AP names rarely change,
+# so we cache for a while and refresh lazily.
 # ---------------------------------------------------------------------------
+_ap_name_cache: dict[str, str] = {}
+_ap_cache_ts = 0.0
+_ap_cache_lock = threading.Lock()
+_AP_CACHE_TTL = 600  # seconds
+
+
+def get_ap_names(force: bool = False) -> dict[str, str]:
+    """Return {AP_MAC_DASH_UPPER: name}. Cached; refreshes every _AP_CACHE_TTL.
+    Best-effort: on any API error, returns whatever we last had (possibly {})."""
+    global _ap_cache_ts
+    now = time.time()
+    if not force and _ap_name_cache and (now - _ap_cache_ts) < _AP_CACHE_TTL:
+        return _ap_name_cache
+    with _ap_cache_lock:
+        if not force and _ap_name_cache and (time.time() - _ap_cache_ts) < _AP_CACHE_TTL:
+            return _ap_name_cache
+        try:
+            devices = omada.list_aps()
+            fresh = {}
+            for d in devices:
+                mac = (d.get("mac") or d.get("deviceMac") or "").upper().replace(":", "-")
+                name = d.get("name") or d.get("deviceName")
+                if mac:
+                    fresh[mac] = name or "Access Point"
+            if fresh:
+                _ap_name_cache.clear()
+                _ap_name_cache.update(fresh)
+            _ap_cache_ts = time.time()
+        except Exception as exc:
+            log.warning("get_ap_names: could not refresh AP list: %s", exc)
+    return _ap_name_cache
+
+
+def resolve_ap(mac: str) -> str | None:
+    """AP MAC → name, or None if unknown."""
+    if not mac:
+        return None
+    return get_ap_names().get(mac.upper().replace(":", "-"))
+
+
+
 def get_nested(data: dict, path: str, default: str = "Unknown") -> str:
     cur = data
     try:
@@ -1677,6 +1874,462 @@ def dhcp_status():
     })
 
 
+@app.route("/api/syslog/status")
+def syslog_status():
+    """Listener state + stored-event stats for the dashboard banner."""
+    total = db.session.query(SyslogEvent.id).count()
+    # Quick breakdown by event_type for the summary.
+    from sqlalchemy import func
+    by_type = {
+        (k or "unknown"): v for k, v in
+        db.session.query(SyslogEvent.event_type, func.count(SyslogEvent.id))
+        .group_by(SyslogEvent.event_type).all()
+    }
+    return jsonify({
+        **syslog_capture.status(),
+        "enabled": SYSLOG_ENABLED,
+        "stored_events": total,
+        "max_rows": SYSLOG_MAX_ROWS,
+        "by_type": by_type,
+        "drop_traffic_flow": _drop_traffic_flow,
+        "dropped_flows": _syslog_dropped_count,
+    })
+
+
+@app.route("/api/syslog/drop_flow", methods=["GET", "POST"])
+def syslog_drop_flow():
+    """Get or set whether traffic_flow events are dropped at ingest.
+    POST body: {"enabled": true|false}. Persisted in GlobalSetting and applied
+    live (no restart needed)."""
+    global _drop_traffic_flow
+    if request.method == "POST":
+        enabled = bool((request.json or {}).get("enabled"))
+        gs = GlobalSetting.query.first()
+        if gs is None:
+            gs = GlobalSetting()
+            db.session.add(gs)
+        gs.drop_traffic_flow = enabled
+        db.session.commit()
+        _drop_traffic_flow = enabled
+        log.info("Syslog drop_traffic_flow set to %s", enabled)
+    return jsonify({"enabled": _drop_traffic_flow,
+                    "dropped_flows": _syslog_dropped_count})
+
+
+@app.route("/api/aps")
+def api_aps():
+    """Diagnostic: the AP MAC→name map used to resolve infrastructure in
+    graphs/briefing/chat. ?refresh=1 forces a re-fetch from Omada. If this
+    returns an empty map, the controller's /devices endpoint didn't return
+    usable data — check the path against your controller's /doc.html."""
+    force = request.args.get("refresh") == "1"
+    try:
+        names = get_ap_names(force=force)
+        return jsonify({"count": len(names), "aps": names,
+                        "cache_age_seconds": round(time.time() - _ap_cache_ts, 1)})
+    except Exception as exc:
+        return jsonify({"error": str(exc), "count": 0, "aps": {}}), 502
+
+
+@app.route("/api/syslog/events")
+def syslog_events():
+    """Query stored syslog events with optional filters. Newest first.
+
+    Query params:
+      mac=<MAC>          filter to a device
+      event_type=<type>  filter to a classification
+      severity=<sev>     filter by severity
+      since=<ISO>        only events received after this timestamp
+      q=<text>           substring match on the message
+      limit=<n>          max rows (default 200, cap 2000)
+    """
+    q = SyslogEvent.query
+    mac = request.args.get("mac")
+    if mac:
+        q = q.filter(SyslogEvent.client_mac == mac.upper().replace(":", "-"))
+    et = request.args.get("event_type")
+    if et:
+        q = q.filter(SyslogEvent.event_type == et)
+    sev = request.args.get("severity")
+    if sev:
+        q = q.filter(SyslogEvent.severity == sev)
+    since = request.args.get("since")
+    if since:
+        q = q.filter(SyslogEvent.received_at >= since)
+    text = request.args.get("q")
+    if text:
+        q = q.filter(SyslogEvent.message.ilike(f"%{text}%"))
+    limit = min(int(request.args.get("limit", 200)), 2000)
+    rows = q.order_by(SyslogEvent.id.desc()).limit(limit).all()
+    return jsonify({
+        "count": len(rows),
+        "events": [{
+            "id": r.id,
+            "received_at": r.received_at,
+            "severity": r.severity,
+            "facility": r.facility,
+            "event_type": r.event_type,
+            "category": r.category,
+            "client_mac": r.client_mac,
+            "client_ip": r.client_ip,
+            "ssid": r.ssid,
+            "channel": r.channel,
+            "hostname": r.hostname,
+            "message": r.message,
+        } for r in rows],
+    })
+
+
+@app.route("/api/syslog/clear", methods=["POST"])
+def syslog_clear():
+    """Wipe all stored syslog events. Useful when reconfiguring or testing."""
+    n = db.session.query(SyslogEvent).delete()
+    db.session.commit()
+    log.info("Cleared %d syslog events on request", n)
+    return jsonify({"cleared": n})
+
+
+# Allowed analysis/graph windows, in minutes. Keeps queries bounded — the
+# flow-log volume means "all events" is never the right scope.
+SYSLOG_WINDOWS = {
+    "15m": 15, "1h": 60, "6h": 360, "24h": 1440, "7d": 10080,
+}
+
+
+def _window_cutoff(window: str) -> tuple[str, int]:
+    """Return (ISO cutoff timestamp, minutes) for a named window. Falls back
+    to 1h for anything unrecognized."""
+    from datetime import datetime, timezone, timedelta
+    minutes = SYSLOG_WINDOWS.get(window, 60)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    return cutoff, minutes
+
+
+@app.route("/api/syslog/graphs")
+def syslog_graphs():
+    """Aggregated data for the Marvis-style charts, constrained to a time
+    window (default 1h). Returns:
+      - timeline:    event counts bucketed over time (for an activity graph)
+      - by_type:     event-type distribution
+      - by_severity: severity distribution
+      - top_talkers: busiest client devices (resolved to names), excluding
+                     pure traffic-flow noise unless it's all there is
+      - by_ap:       events per access point (from flow logs' AP MAC)
+    All bounded to the window so we never scan the whole table.
+    """
+    from sqlalchemy import func
+
+    window = request.args.get("window", "1h")
+    cutoff, minutes = _window_cutoff(window)
+    base = SyslogEvent.query.filter(SyslogEvent.received_at >= cutoff)
+    total = base.count()
+
+    # --- Timeline buckets ---
+    # Choose a bucket size that yields ~30-60 buckets across the window.
+    bucket_sec = max(60, (minutes * 60) // 48)
+    timeline_rows = db.session.query(
+        SyslogEvent.received_at, SyslogEvent.event_type
+    ).filter(SyslogEvent.received_at >= cutoff).all()
+
+    from datetime import datetime, timezone
+    buckets: dict = {}
+    for received_at, etype in timeline_rows:
+        try:
+            ts = datetime.strptime(received_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        epoch = int(ts.timestamp())
+        b = epoch - (epoch % bucket_sec)
+        if b not in buckets:
+            buckets[b] = {"t": b, "total": 0, "flow": 0, "lifecycle": 0}
+        buckets[b]["total"] += 1
+        if etype == "traffic_flow":
+            buckets[b]["flow"] += 1
+        else:
+            buckets[b]["lifecycle"] += 1
+    timeline = sorted(buckets.values(), key=lambda x: x["t"])
+
+    # --- Distributions ---
+    # Coerce NULL event_type/severity to a string label — json.dumps sorts dict
+    # keys and can't compare str vs None, which would 500 the endpoint.
+    by_type = {
+        (k or "unknown"): v for k, v in db.session.query(
+            SyslogEvent.event_type, func.count(SyslogEvent.id)
+        ).filter(SyslogEvent.received_at >= cutoff).group_by(SyslogEvent.event_type).all()
+    }
+
+    by_severity = {
+        (k or "unknown"): v for k, v in db.session.query(
+            SyslogEvent.severity, func.count(SyslogEvent.id)
+        ).filter(SyslogEvent.received_at >= cutoff).group_by(SyslogEvent.severity).all()
+    }
+
+    # --- Top talkers (busiest clients), with identification ---
+    talker_rows = db.session.query(
+        SyslogEvent.client_mac, func.count(SyslogEvent.id).label("n")
+    ).filter(
+        SyslogEvent.received_at >= cutoff, SyslogEvent.client_mac.isnot(None)
+    ).group_by(SyslogEvent.client_mac).order_by(func.count(SyslogEvent.id).desc()).limit(12).all()
+
+    def _name_for(mac):
+        s = db.session.get(DeviceSetting, mac)
+        if s:
+            if s.last_synced_name:
+                return s.last_synced_name
+            if s.ai_analysis:
+                try:
+                    ai = json.loads(s.ai_analysis)
+                    if ai.get("short_name"):
+                        return ai["short_name"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        # Fall back to AP name — flow logs sometimes carry an AP MAC as the
+        # client (mesh / AP management traffic). Label it rather than show bare.
+        return resolve_ap(mac)
+
+    top_talkers = [{
+        "mac": m, "name": _name_for(m), "events": n,
+        "is_ap": bool(resolve_ap(m)),
+    } for m, n in talker_rows]
+
+    # --- Events per AP (device_name holds the AP MAC for flow logs) ---
+    by_ap_raw = db.session.query(
+        SyslogEvent.device_name, func.count(SyslogEvent.id)
+    ).filter(
+        SyslogEvent.received_at >= cutoff, SyslogEvent.device_name.isnot(None)
+    ).group_by(SyslogEvent.device_name).order_by(func.count(SyslogEvent.id).desc()).limit(10).all()
+    by_ap = dict(by_ap_raw)
+    # Resolved variant: AP MAC → Omada name where known.
+    by_ap_named = [{
+        "mac": mac, "name": resolve_ap(mac), "events": n
+    } for mac, n in by_ap_raw]
+
+    return jsonify({
+        "window": window,
+        "window_minutes": minutes,
+        "bucket_seconds": bucket_sec,
+        "total": total,
+        "timeline": timeline,
+        "by_type": by_type,
+        "by_severity": by_severity,
+        "top_talkers": top_talkers,
+        "by_ap": by_ap,
+        "by_ap_named": by_ap_named,
+    })
+
+
+def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
+    """Aggregate recent syslog events into a compact, token-efficient summary
+    for the AI briefing. Dumping thousands of raw lines would blow the context
+    window and bury the signal, so we roll events up into the patterns an
+    analyst actually reasons over:
+      - counts by event type and severity
+      - the noisiest clients (most events) with their identification
+      - clients with repeated auth failures (a security/config smell)
+      - clients that connect/disconnect repeatedly (flapping)
+      - APs going offline
+      - a small sample of the most severe raw lines for flavour
+    """
+    from sqlalchemy import func
+    from datetime import datetime, timezone, timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    base = SyslogEvent.query.filter(SyslogEvent.received_at >= cutoff)
+    total = base.count()
+
+    by_type = dict(db.session.query(
+        SyslogEvent.event_type, func.count(SyslogEvent.id)
+    ).filter(SyslogEvent.received_at >= cutoff).group_by(SyslogEvent.event_type).all())
+
+    by_severity = dict(db.session.query(
+        SyslogEvent.severity, func.count(SyslogEvent.id)
+    ).filter(SyslogEvent.received_at >= cutoff).group_by(SyslogEvent.severity).all())
+
+    # Noisiest clients (most events).
+    noisy = db.session.query(
+        SyslogEvent.client_mac, func.count(SyslogEvent.id).label("n")
+    ).filter(
+        SyslogEvent.received_at >= cutoff, SyslogEvent.client_mac.isnot(None)
+    ).group_by(SyslogEvent.client_mac).order_by(func.count(SyslogEvent.id).desc()).limit(15).all()
+
+    # Repeated auth failures per client.
+    auth_fails = db.session.query(
+        SyslogEvent.client_mac, func.count(SyslogEvent.id).label("n")
+    ).filter(
+        SyslogEvent.received_at >= cutoff,
+        SyslogEvent.event_type == "auth_failed",
+        SyslogEvent.client_mac.isnot(None),
+    ).group_by(SyslogEvent.client_mac).order_by(func.count(SyslogEvent.id).desc()).limit(10).all()
+
+    # Flapping: clients with many connect+disconnect events.
+    flap = db.session.query(
+        SyslogEvent.client_mac, func.count(SyslogEvent.id).label("n")
+    ).filter(
+        SyslogEvent.received_at >= cutoff,
+        SyslogEvent.event_type.in_(["client_connect", "client_disconnect", "reconnect"]),
+        SyslogEvent.client_mac.isnot(None),
+    ).group_by(SyslogEvent.client_mac).order_by(func.count(SyslogEvent.id).desc()).limit(10).all()
+
+    # AP / infra offline events (no client MAC, infra event types).
+    infra = base.filter(
+        SyslogEvent.event_type.in_(["offline", "online"])
+    ).order_by(SyslogEvent.id.desc()).limit(20).all()
+
+    # A few of the most severe raw lines (error/warning) for texture.
+    severe = base.filter(
+        SyslogEvent.severity.in_(["error", "err", "warning", "warn", "critical", "alert"])
+    ).order_by(SyslogEvent.id.desc()).limit(25).all()
+
+    # Resolve client MACs to identification info so the briefing can name them.
+    def _client_label(mac):
+        if not mac:
+            return "?"
+        # Access point? Label it explicitly so the briefing doesn't mistake
+        # infrastructure for a rogue/chatty client device.
+        ap_name = resolve_ap(mac)
+        if ap_name:
+            return f"{mac} / {ap_name} [ACCESS POINT — infrastructure, relays client traffic]"
+        s = db.session.get(DeviceSetting, mac)
+        bits = [mac]
+        if s:
+            if s.last_synced_name:
+                bits.append(s.last_synced_name)
+            if s.ai_analysis:
+                try:
+                    ai = json.loads(s.ai_analysis)
+                    if ai.get("short_name"):
+                        bits.append(ai["short_name"])
+                    elif ai.get("brief_description"):
+                        bits.append(ai["brief_description"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if s.notes:
+                bits.append(f"notes: {s.notes[:80]}")
+        # Dedupe consecutive/identical fragments (e.g. synced name == AI short_name)
+        seen = set()
+        deduped = []
+        for b in bits:
+            key = b.lower().strip()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(b)
+        return " / ".join(deduped)
+
+    return {
+        "window_hours": hours,
+        "total_events": total,
+        "by_type": by_type,
+        "by_severity": by_severity,
+        "noisy_clients": [{"client": _client_label(m), "events": n} for m, n in noisy],
+        "auth_failures": [{"client": _client_label(m), "fails": n} for m, n in auth_fails],
+        "flapping_clients": [{"client": _client_label(m), "transitions": n} for m, n in flap],
+        "infra_events": [{"type": e.event_type, "message": (e.message or "")[:160],
+                          "at": e.received_at} for e in infra],
+        "severe_samples": [{"sev": e.severity, "type": e.event_type,
+                            "client": e.client_mac, "message": (e.message or "")[:200]}
+                           for e in severe],
+    }
+
+
+@app.route("/api/syslog/analyze", methods=["POST"])
+def syslog_analyze():
+    """Marvis-style network-health briefing. Aggregates the recent syslog
+    window + client identification and asks Gemini to surface the top issues,
+    likely root causes, and recommended actions — a 'morning cup of coffee'
+    view of what needs attention."""
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "No Gemini API key configured — set one in Settings"}), 400
+
+    # Accept either a named window (15m/1h/6h/24h/7d) — shared with the graphs
+    # selector — or an explicit hours value. Named window takes precedence.
+    body = (request.json or {}) if request.is_json else {}
+    window = body.get("window")
+    if window and window in SYSLOG_WINDOWS:
+        minutes = SYSLOG_WINDOWS[window]
+        hours = max(1, round(minutes / 60))
+        window_label = window
+    else:
+        hours = int(body.get("hours", 24))
+        window_label = f"last {hours}h"
+    summary = _summarize_syslog_window(hours=hours)
+
+    if summary["total_events"] == 0:
+        return jsonify({
+            "briefing": f"No syslog events in {window_label}. Either the "
+                        f"network has been quiet, or Omada syslog export isn't "
+                        f"reaching this host yet (point it at UDP/{SYSLOG_PORT}).",
+            "events_analyzed": 0,
+            "window": window_label,
+            "model": get_active_gemini_model(),
+        })
+
+    system_prompt = (
+        "You are a senior network operations analyst producing a concise "
+        "morning briefing for a home/small-office network managed by TP-Link "
+        "Omada. You are given an AGGREGATED summary of the last "
+        f"{hours} hours of syslog events (already rolled up — you don't see "
+        "every raw line). Your job, in the style of an AIOps assistant:\n"
+        "\n"
+        "1. Lead with a one-line overall health verdict (healthy / minor "
+        "issues / needs attention).\n"
+        "2. List the TOP 3-5 issues worth the operator's attention, most "
+        "important first. For each: what's happening, which device(s) "
+        "(name them by their identification, and include the MAC so the UI "
+        "can link to them), a likely root cause, and a concrete recommended "
+        "action.\n"
+        "3. Call out anything that looks like a security concern (repeated "
+        "auth failures could be a wrong saved password OR a brute-force "
+        "attempt — say which is more likely given the pattern).\n"
+        "4. Note what looks normal/healthy so the operator isn't alarmed by "
+        "routine churn (a phone connecting/disconnecting as someone comes and "
+        "goes is normal; a stationary IoT device flapping 50x/hour is not).\n"
+        "\n"
+        "Be specific and grounded in the data provided — don't invent events. "
+        "If the data is benign, say so plainly rather than manufacturing "
+        "concerns. Use plain text with short paragraphs or simple bullet "
+        "lists. Always include device MACs when discussing specific devices."
+    )
+
+    user_content = (
+        "Here is the aggregated network event summary to analyze:\n\n"
+        + json.dumps(summary, indent=2)
+    )
+
+    model_id = get_active_gemini_model()
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048},
+    }
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{model_id}:generateContent")
+    try:
+        r = requests.post(url, params={"key": GEMINI_API_KEY},
+                          json=payload, timeout=90)
+        r.raise_for_status()
+        body = r.json()
+        briefing = body["candidates"][0]["content"]["parts"][0]["text"]
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        log.error("syslog_analyze: Gemini HTTP error: %s", detail)
+        return jsonify({"error": f"Gemini API error: {detail[:300]}"}), 502
+    except (KeyError, IndexError) as exc:
+        return jsonify({"error": f"Unexpected Gemini response: {exc}"}), 502
+    except Exception as exc:
+        log.exception("syslog_analyze: Gemini call failed")
+        return jsonify({"error": str(exc)}), 502
+
+    log.info("Network briefing generated over %d events (%dh window)",
+             summary["total_events"], hours)
+    return jsonify({
+        "briefing": briefing,
+        "events_analyzed": summary["total_events"],
+        "window": window_label,
+        "model": model_id,
+    })
+
+
 @app.route("/api/dhcp_manual", methods=["POST"])
 def dhcp_manual():
     """Manually set a DHCP fingerprint and/or vendor class for a MAC.
@@ -1984,6 +2637,25 @@ def _build_fleet_summary(clients: list) -> str:
         if c.get("notes"):
             notes = c["notes"].replace("\n", " ").strip()[:200]
             lines.append(f"  owner_notes={notes}")
+
+    # Network-wide syslog summary (last 24h) so fleet-scope chat can answer
+    # event questions like "any auth failures today?" without a separate call.
+    try:
+        from sqlalchemy import func
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_total = SyslogEvent.query.filter(SyslogEvent.received_at >= cutoff).count()
+        if recent_total:
+            by_type = dict(db.session.query(
+                SyslogEvent.event_type, func.count(SyslogEvent.id)
+            ).filter(SyslogEvent.received_at >= cutoff)
+             .group_by(SyslogEvent.event_type).all())
+            lines.append("")
+            lines.append(f"=== Syslog (last 24h): {recent_total} events ===")
+            lines.append("By type: " + ", ".join(f"{k}={v}" for k, v in
+                         sorted(by_type.items(), key=lambda kv: -kv[1])))
+    except Exception:
+        pass  # syslog is best-effort context; never break chat over it
     return "\n".join(lines)
 
 
@@ -2043,6 +2715,20 @@ def _build_device_dossier(c: dict) -> str:
             if parents:
                 chain = " > ".join(p.get("name", "?") for p in parents)
                 lines.append(f"Fingerbank hierarchy: {chain}")
+
+    # Recent syslog events for this device — lets the chat answer questions
+    # like "why did this keep dropping last night?" with actual event history.
+    mac = c.get("mac")
+    if mac:
+        recent = (SyslogEvent.query
+                  .filter(SyslogEvent.client_mac == mac)
+                  .order_by(SyslogEvent.id.desc()).limit(40).all())
+        if recent:
+            lines.append(f"\nRecent syslog events ({len(recent)}, newest first):")
+            for e in recent:
+                ts = e.received_at or "?"
+                lines.append(f"  [{ts}] {e.severity or '-'}/{e.event_type or '-'}: "
+                             f"{(e.message or '')[:140]}")
     return "\n".join(lines)
 
 
@@ -2107,6 +2793,44 @@ def _build_chat_system_prompt(scope: str, clients: list) -> str:
         "tappable). Be direct, like a colleague debugging next to them; "
         "skip filler.\n"
         "\n"
+        "=== Live query tools ===\n"
+        "You have tools to read the network's REAL syslog/event data. NEVER "
+        "guess at counts, event histories, or which devices have problems — "
+        "call a tool and answer from the result. Tools available:\n"
+        "  • find_device — resolve a plain-language device reference ('my "
+        "iPad', a partial name, an IP) to a MAC. Call this FIRST whenever the "
+        "user names a specific device, then use the MAC in other tools.\n"
+        "  • count_events — count events (optionally by device/type/window). "
+        "For 'how many times did X disconnect'.\n"
+        "  • list_events — recent events matching filters. For 'show me what "
+        "happened with X'.\n"
+        "  • status_of_clients — rank devices by problem events. For 'which "
+        "devices are having trouble'.\n"
+        "  • troubleshoot_device — full diagnostic for one device. For 'why "
+        "can't X connect', 'what's wrong with X'.\n"
+        "  • roaming_of — a device's roaming history. For 'is X roaming too "
+        "much'.\n"
+        "  • aggregate_events — group + rank events in ONE call (top talkers, "
+        "busiest APs, type breakdown, trend over time) with counts, "
+        "percentages and per-hour rates. ALWAYS prefer this over making many "
+        "count_events calls. When the answer is a ranking, distribution, or "
+        "trend that a picture would clarify, set chart=true so the UI draws "
+        "it — then summarize the key takeaway in text above it. Don't chart a "
+        "single number.\n"
+        "After calling tools, synthesize the results into a clear, grounded "
+        "answer. If a tool returns zero events, say so plainly rather than "
+        "speculating. Cite the actual numbers you got back. The system handles "
+        "all arithmetic (percentages, rates) for you in the tool results — use "
+        "those values rather than computing your own.\n"
+        "\n"
+        "IMPORTANT — APs vs clients: in this network's flow logs, the busiest "
+        "MACs are usually ACCESS POINTS (the AP that relayed a client's "
+        "traffic), not rogue or chatty client devices. Tool results mark these "
+        "with is_ap=true and resolve them to AP names when known. Never "
+        "describe an access point as an 'unidentified device', 'media "
+        "streamer', or 'device phoning home' — it's infrastructure carrying "
+        "everyone's traffic. When a top talker is an AP, say so.\n"
+        "\n"
     )
     if scope == "all":
         return header + "=== Current network state ===\n" + _build_fleet_summary(clients)
@@ -2118,6 +2842,512 @@ def _build_chat_system_prompt(scope: str, clients: list) -> str:
                 f"be offline. Acknowledge this and offer to discuss it "
                 f"based on whatever historical data the user provides.)")
     return header + _build_device_dossier(target)
+
+
+# ---------------------------------------------------------------------------
+# Marvis-style query tools for the chatbot
+# ---------------------------------------------------------------------------
+# Gemini drives the conversation in natural language but, instead of guessing,
+# it calls these structured tools to read real data — the modern equivalent of
+# Marvis's LIST / COUNT / STATUSOF / TROUBLESHOOT / ROAMINGOF query language.
+# Each tool returns plain dicts/lists that get fed back to the model.
+
+# Gemini function-calling schema (subset of OpenAPI). Declared once, sent with
+# every chat request.
+CHAT_TOOLS = [{
+    "functionDeclarations": [
+        {
+            "name": "find_device",
+            "description": "Resolve a device the user names in plain language "
+                           "(e.g. 'my iPad', 'the front gate camera', a partial "
+                           "name, IP, or MAC) to its MAC address and identity. "
+                           "Call this first when the user refers to a specific "
+                           "device so later tool calls can use its MAC.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string",
+                              "description": "Name, partial name, IP, hostname, "
+                                             "or MAC the user mentioned."},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "count_events",
+            "description": "Count syslog events matching filters over a time "
+                           "window. Use for 'how many times…', 'how many auth "
+                           "failures…' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mac": {"type": "string", "description": "Client MAC (dash or colon form). Omit for all devices."},
+                    "event_type": {"type": "string", "description": "One of: client_connect, client_disconnect, reconnect, roamed, roaming, auth_failed, deauth, dhcp, online, offline, traffic_flow, other."},
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24)."},
+                },
+            },
+        },
+        {
+            "name": "list_events",
+            "description": "List recent syslog events matching filters, newest "
+                           "first. Use for 'show me…', 'what happened with…'. "
+                           "Returns up to 'limit' events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mac": {"type": "string"},
+                    "event_type": {"type": "string"},
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24)."},
+                    "limit": {"type": "number", "description": "Max events to return (default 20, cap 50)."},
+                },
+            },
+        },
+        {
+            "name": "status_of_clients",
+            "description": "Rank clients by how many problem events (auth "
+                           "failures, disconnects, deauths) they've had over the "
+                           "window — the worst first. Use for 'which devices are "
+                           "having trouble', 'any connectivity issues'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24)."},
+                },
+            },
+        },
+        {
+            "name": "troubleshoot_device",
+            "description": "Gather a full diagnostic picture for one device: its "
+                           "identity, recent event breakdown by type, and a "
+                           "sample of its most recent events. Use for 'why can't "
+                           "X connect', 'troubleshoot X', 'what's wrong with X'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mac": {"type": "string", "description": "The device's MAC (resolve with find_device first if needed)."},
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24)."},
+                },
+                "required": ["mac"],
+            },
+        },
+        {
+            "name": "roaming_of",
+            "description": "Show a device's roaming history over a period — which "
+                           "APs it moved between and when, as an ordered hop "
+                           "sequence with a per-AP dwell summary. Use for 'show "
+                           "roaming for X', 'how much has X roamed this week', 'is "
+                           "X flapping between APs'. Set chart=true to visualize "
+                           "the roam timeline.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mac": {"type": "string"},
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24; use 168 for 'last 7 days')."},
+                    "chart": {"type": "boolean", "description": "If true, include a timeline chart of roam events."},
+                },
+                "required": ["mac"],
+            },
+        },
+        {
+            "name": "aggregate_events",
+            "description": "Aggregate events in ONE call — far better than many "
+                           "count_events calls. Groups events and returns ranked "
+                           "buckets with counts, percentages, and a per-hour rate. "
+                           "Use for 'top talkers', 'busiest APs', 'breakdown by "
+                           "type', 'which devices are noisiest'. "
+                           "group_by: 'client' (busiest devices, name-resolved), "
+                           "'ap' (busiest access points), 'event_type' "
+                           "(distribution), or 'time' (counts per time bucket for "
+                           "a trend). Set chart=true when a visual would help the "
+                           "user (ranked lists, distributions, trends) — the UI "
+                           "renders it as a chart. Pick chart_type: 'bar' for "
+                           "rankings/distributions, 'line' for time trends, "
+                           "'doughnut' for proportions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_by": {"type": "string", "description": "client | ap | event_type | time"},
+                    "event_type": {"type": "string", "description": "Optional: restrict to one event type before aggregating."},
+                    "mac": {"type": "string", "description": "Optional: restrict to one device (useful with group_by=time or event_type)."},
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 1)."},
+                    "limit": {"type": "number", "description": "Top-N buckets to return for client/ap/event_type (default 8, cap 20)."},
+                    "chart": {"type": "boolean", "description": "If true, include a chart spec the UI will render."},
+                    "chart_type": {"type": "string", "description": "bar | line | doughnut. Defaults: bar for rankings, line for time."},
+                },
+                "required": ["group_by"],
+            },
+        },
+    ]
+}]
+
+
+def _hours_cutoff(hours: float) -> str:
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=hours or 24)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _device_identity(mac: str) -> dict:
+    """Compact identity dict for a MAC: synced/AI name, type, vendor, plus an
+    is_ap flag and AP name when the MAC is one of our access points. Used by the
+    chat tools so answers can name devices and link back to them."""
+    out = {"mac": mac, "name": None, "type": None, "vendor": None,
+           "notes": None, "is_ap": False}
+    s = db.session.get(DeviceSetting, mac)
+    if s:
+        out["notes"] = (s.notes or None)
+        if s.last_synced_name:
+            out["name"] = s.last_synced_name
+        if s.ai_analysis:
+            try:
+                ai = json.loads(s.ai_analysis)
+                out["name"] = out["name"] or ai.get("short_name") or ai.get("brief_description")
+                out["type"] = ai.get("device_type") or ai.get("type")
+                out["vendor"] = ai.get("vendor") or ai.get("manufacturer")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        out["vendor"] = out["vendor"] or getattr(s, "oui_vendor", None)
+    # AP fallback: if this MAC is one of our access points, label it as such.
+    ap_name = resolve_ap(mac)
+    if ap_name:
+        out["is_ap"] = True
+        out["name"] = out["name"] or ap_name
+        out["type"] = out["type"] or "Access Point"
+    return out
+
+
+def _tool_find_device(args: dict, clients: list) -> dict:
+    """Resolve a free-text reference to a device. Searches the live client list,
+    DeviceSettings, and access points by name, IP, hostname, and MAC."""
+    q = (args.get("query") or "").strip().lower()
+    if not q:
+        return {"error": "empty query"}
+    q_mac = q.upper().replace(":", "-")
+    matches = []
+    for c in clients:
+        mac = c.get("mac", "")
+        hay = " ".join(str(x) for x in [
+            c.get("name"), c.get("dhcp_hostname"), c.get("resolved_name"),
+            c.get("ip"), mac, c.get("oui_vendor"), c.get("resolved_type"),
+        ] if x).lower()
+        if q in hay or q_mac in mac.upper():
+            matches.append({
+                "mac": mac,
+                "name": c.get("name") or c.get("resolved_name") or c.get("dhcp_hostname"),
+                "ip": c.get("ip"),
+                "type": c.get("resolved_type") or c.get("deviceType"),
+                "vendor": c.get("oui_vendor"),
+                "is_ap": False,
+                "online": True,
+            })
+    # Also search DeviceSettings (covers offline devices with a synced name)
+    if not matches:
+        for s in DeviceSetting.query.all():
+            name = s.last_synced_name or ""
+            if q in name.lower() or q_mac in (s.mac or "").upper():
+                matches.append({"mac": s.mac, "name": name or None,
+                                "ip": None, "type": None, "is_ap": False,
+                                "online": False})
+    # Also search access points (so 'garage AP' resolves the infrastructure).
+    for ap_mac, ap_name in get_ap_names().items():
+        if q in (ap_name or "").lower() or q_mac in ap_mac.upper():
+            if not any(m["mac"].upper().replace(":", "-") == ap_mac for m in matches):
+                matches.append({"mac": ap_mac, "name": ap_name, "ip": None,
+                                "type": "Access Point", "is_ap": True,
+                                "online": True})
+    return {"matches": matches[:8], "count": len(matches)}
+
+
+def _tool_count_events(args: dict) -> dict:
+    qy = SyslogEvent.query.filter(SyslogEvent.received_at >= _hours_cutoff(args.get("hours", 24)))
+    if args.get("mac"):
+        qy = qy.filter(SyslogEvent.client_mac == args["mac"].upper().replace(":", "-"))
+    if args.get("event_type"):
+        qy = qy.filter(SyslogEvent.event_type == args["event_type"])
+    return {"count": qy.count(),
+            "window_hours": args.get("hours", 24),
+            "filters": {k: args.get(k) for k in ("mac", "event_type") if args.get(k)}}
+
+
+def _tool_list_events(args: dict) -> dict:
+    limit = min(int(args.get("limit", 20) or 20), 50)
+    qy = SyslogEvent.query.filter(SyslogEvent.received_at >= _hours_cutoff(args.get("hours", 24)))
+    if args.get("mac"):
+        qy = qy.filter(SyslogEvent.client_mac == args["mac"].upper().replace(":", "-"))
+    if args.get("event_type"):
+        qy = qy.filter(SyslogEvent.event_type == args["event_type"])
+    rows = qy.order_by(SyslogEvent.id.desc()).limit(limit).all()
+    return {"events": [{
+        "at": r.received_at, "type": r.event_type, "severity": r.severity,
+        "mac": r.client_mac, "ssid": r.ssid, "ap": r.device_name,
+        "message": (r.message or "")[:200],
+    } for r in rows], "count": len(rows)}
+
+
+def _tool_status_of_clients(args: dict) -> dict:
+    from sqlalchemy import func
+    cutoff = _hours_cutoff(args.get("hours", 24))
+    problem_types = ["auth_failed", "deauth", "client_disconnect", "reconnect"]
+    rows = db.session.query(
+        SyslogEvent.client_mac, func.count(SyslogEvent.id).label("n")
+    ).filter(
+        SyslogEvent.received_at >= cutoff,
+        SyslogEvent.event_type.in_(problem_types),
+        SyslogEvent.client_mac.isnot(None),
+    ).group_by(SyslogEvent.client_mac).order_by(
+        func.count(SyslogEvent.id).desc()).limit(10).all()
+    out = []
+    for mac, n in rows:
+        ident = _device_identity(mac)
+        # Break down what kinds of problems
+        breakdown = dict(db.session.query(
+            SyslogEvent.event_type, func.count(SyslogEvent.id)
+        ).filter(
+            SyslogEvent.received_at >= cutoff,
+            SyslogEvent.client_mac == mac,
+            SyslogEvent.event_type.in_(problem_types),
+        ).group_by(SyslogEvent.event_type).all())
+        out.append({"mac": mac, "name": ident["name"],
+                    "problem_events": n, "breakdown": breakdown})
+    return {"clients_with_issues": out, "window_hours": args.get("hours", 24)}
+
+
+def _tool_troubleshoot_device(args: dict) -> dict:
+    from sqlalchemy import func
+    mac = (args.get("mac") or "").upper().replace(":", "-")
+    if not mac:
+        return {"error": "mac required"}
+    cutoff = _hours_cutoff(args.get("hours", 24))
+    ident = _device_identity(mac)
+    by_type = dict(db.session.query(
+        SyslogEvent.event_type, func.count(SyslogEvent.id)
+    ).filter(
+        SyslogEvent.received_at >= cutoff, SyslogEvent.client_mac == mac
+    ).group_by(SyslogEvent.event_type).all())
+    recent = SyslogEvent.query.filter(
+        SyslogEvent.received_at >= cutoff, SyslogEvent.client_mac == mac
+    ).order_by(SyslogEvent.id.desc()).limit(15).all()
+    return {
+        "device": ident,
+        "event_breakdown": by_type,
+        "recent_events": [{
+            "at": r.received_at, "type": r.event_type, "severity": r.severity,
+            "ssid": r.ssid, "ap": r.device_name, "message": (r.message or "")[:160],
+        } for r in recent],
+        "window_hours": args.get("hours", 24),
+    }
+
+
+def _tool_roaming_of(args: dict) -> dict:
+    """Roaming history over a window: ordered AP-hop sequence (oldest→newest)
+    with resolved AP names, a per-AP visit tally, and an optional timeline
+    chart. Degrades gracefully when no roam events were captured."""
+    from datetime import datetime, timezone
+    mac = (args.get("mac") or "").upper().replace(":", "-")
+    if not mac:
+        return {"error": "mac required"}
+    hours = float(args.get("hours") or 24)
+    cutoff = _hours_cutoff(hours)
+    # Oldest→newest so the hop sequence reads chronologically.
+    rows = SyslogEvent.query.filter(
+        SyslogEvent.received_at >= cutoff,
+        SyslogEvent.client_mac == mac,
+        SyslogEvent.event_type.in_(["roamed", "roaming"]),
+    ).order_by(SyslogEvent.id.asc()).limit(200).all()
+
+    ident = _device_identity(mac)
+    if not rows:
+        return {
+            "device": ident,
+            "roam_count": 0,
+            "window_hours": hours,
+            "note": ("No roaming events were captured for this device in the "
+                     "window. Omada may not be exporting roam/roaming events "
+                     "over syslog — the data here is mostly traffic-flow and "
+                     "DHCP. Roaming visibility needs the controller's client "
+                     "roaming events enabled in syslog export."),
+        }
+
+    # Build the hop sequence and per-AP tally with resolved AP names.
+    hops = []
+    ap_tally: dict = {}
+    chart_labels, chart_values = [], []
+    for r in rows:
+        ap_mac = r.device_name
+        ap_name = resolve_ap(ap_mac) or ap_mac
+        hops.append({"at": r.received_at, "ap_mac": ap_mac, "ap": ap_name,
+                     "ssid": r.ssid})
+        ap_tally[ap_name] = ap_tally.get(ap_name, 0) + 1
+
+    # Count transitions (an actual move between two different APs).
+    transitions = sum(
+        1 for i in range(1, len(hops)) if hops[i]["ap_mac"] != hops[i - 1]["ap_mac"]
+    )
+
+    result = {
+        "device": ident,
+        "roam_count": len(rows),
+        "transitions": transitions,
+        "aps_visited": sorted(ap_tally.items(), key=lambda kv: kv[1], reverse=True),
+        "hops": hops[-50:],   # cap returned hops for token sanity
+        "window_hours": hours,
+    }
+
+    # Optional timeline chart: roam events bucketed over the window.
+    if args.get("chart"):
+        minutes = hours * 60
+        bucket_sec = max(300, int((minutes * 60) // 24))
+        counts: dict = {}
+        for r in rows:
+            try:
+                ts = datetime.strptime(r.received_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            epoch = int(ts.timestamp())
+            b = epoch - (epoch % bucket_sec)
+            counts[b] = counts.get(b, 0) + 1
+        for b in sorted(counts):
+            lbl = datetime.fromtimestamp(b, tz=timezone.utc).astimezone().strftime(
+                "%m-%d %H:%M" if hours > 36 else "%H:%M")
+            chart_labels.append(lbl)
+            chart_values.append(counts[b])
+        if chart_labels:
+            result["chart"] = {
+                "type": "line",
+                "title": f"Roam events — {ident['name'] or mac}",
+                "labels": chart_labels,
+                "values": chart_values,
+                "window_hours": hours,
+            }
+    return result
+
+
+def _tool_aggregate_events(args: dict) -> dict:
+    """One-shot aggregation: group events and return ranked buckets with counts,
+    percentages, and per-hour rates. Optionally emits a chart spec the frontend
+    renders. Replaces the brute-force pattern of many count_events calls."""
+    from sqlalchemy import func
+    group_by = (args.get("group_by") or "client").strip()
+    hours = float(args.get("hours") or 1)
+    cutoff = _hours_cutoff(hours)
+    limit = min(int(args.get("limit", 8) or 8), 20)
+
+    base = SyslogEvent.query.filter(SyslogEvent.received_at >= cutoff)
+    if args.get("event_type"):
+        base = base.filter(SyslogEvent.event_type == args["event_type"])
+    if args.get("mac"):
+        base = base.filter(SyslogEvent.client_mac == args["mac"].upper().replace(":", "-"))
+    total = base.count()
+
+    def _pct(n):
+        return round(n / total * 100, 1) if total else 0.0
+
+    def _rate(n):
+        return round(n / hours, 1) if hours else float(n)
+
+    labels, values, buckets = [], [], []
+
+    if group_by == "time":
+        # Counts per time bucket (~30 buckets across the window).
+        from datetime import datetime, timezone
+        minutes = hours * 60
+        bucket_sec = max(60, int((minutes * 60) // 30))
+        rows = db.session.query(SyslogEvent.received_at).filter(
+            SyslogEvent.received_at >= cutoff)
+        if args.get("event_type"):
+            rows = rows.filter(SyslogEvent.event_type == args["event_type"])
+        if args.get("mac"):
+            rows = rows.filter(SyslogEvent.client_mac == args["mac"].upper().replace(":", "-"))
+        counts: dict = {}
+        for (received_at,) in rows.all():
+            try:
+                ts = datetime.strptime(received_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            epoch = int(ts.timestamp())
+            b = epoch - (epoch % bucket_sec)
+            counts[b] = counts.get(b, 0) + 1
+        for b in sorted(counts):
+            hhmm = datetime.fromtimestamp(b, tz=timezone.utc).astimezone().strftime("%H:%M")
+            labels.append(hhmm)
+            values.append(counts[b])
+            buckets.append({"label": hhmm, "count": counts[b]})
+        chart_default = "line"
+    else:
+        # client | ap | event_type ranking.
+        col = {
+            "client": SyslogEvent.client_mac,
+            "ap": SyslogEvent.device_name,
+            "event_type": SyslogEvent.event_type,
+        }.get(group_by, SyslogEvent.client_mac)
+        q = base.with_entities(col, func.count(SyslogEvent.id)).filter(
+            col.isnot(None)).group_by(col).order_by(func.count(SyslogEvent.id).desc()).limit(limit)
+        for key, n in q.all():
+            label = key
+            extra = {}
+            if group_by == "client":
+                ident = _device_identity(key)
+                label = ident["name"] or key
+                extra = {"name": ident["name"], "type": ident["type"], "is_ap": ident["is_ap"]}
+            elif group_by == "ap":
+                ap_name = resolve_ap(key)
+                label = ap_name or key
+                extra = {"name": ap_name, "is_ap": True}
+            elif group_by == "event_type":
+                label = key or "unknown"
+            buckets.append({"key": key, "label": label, "count": n,
+                            "pct": _pct(n), "per_hour": _rate(n), **extra})
+            labels.append(label)
+            values.append(n)
+        chart_default = "doughnut" if group_by == "event_type" else "bar"
+
+    result = {
+        "group_by": group_by,
+        "window_hours": hours,
+        "total_events": total,
+        "buckets": buckets,
+    }
+
+    # Optional chart spec — the frontend turns this into a Chart.js chart.
+    if args.get("chart") and labels:
+        ctype = (args.get("chart_type") or chart_default).strip()
+        if ctype not in ("bar", "line", "doughnut"):
+            ctype = chart_default
+        title_map = {
+            "client": "Busiest devices", "ap": "Busiest access points",
+            "event_type": "Events by type", "time": "Events over time",
+        }
+        result["chart"] = {
+            "type": ctype,
+            "title": title_map.get(group_by, "Event aggregation"),
+            "labels": labels,
+            "values": values,
+            "window_hours": hours,
+        }
+    return result
+
+
+def _execute_chat_tool(name: str, args: dict, clients: list) -> dict:
+    """Dispatch a Gemini function call to its executor."""
+    try:
+        if name == "find_device":
+            return _tool_find_device(args, clients)
+        if name == "count_events":
+            return _tool_count_events(args)
+        if name == "list_events":
+            return _tool_list_events(args)
+        if name == "status_of_clients":
+            return _tool_status_of_clients(args)
+        if name == "troubleshoot_device":
+            return _tool_troubleshoot_device(args)
+        if name == "roaming_of":
+            return _tool_roaming_of(args)
+        if name == "aggregate_events":
+            return _tool_aggregate_events(args)
+        return {"error": f"unknown tool {name}"}
+    except Exception as exc:
+        log.exception("chat tool %s failed", name)
+        return {"error": str(exc)}
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -2172,22 +3402,63 @@ def chat():
     if not contents or contents[-1]["role"] != "user":
         return jsonify({"error": "last message must be from the user"}), 400
 
-    payload = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.4,
-            "maxOutputTokens": 4096,
-        },
-    }
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model_id}:generateContent")
+
+    # Tool-using loop: Gemini may call our Marvis-style query tools to read
+    # real data before answering. We run up to a few rounds of
+    # call → execute → feed-back until it produces a text answer.
+    tool_trace = []
+    charts = []          # chart specs harvested from aggregate_events results
+    reply = None
+    MAX_ROUNDS = 5
     try:
-        r = requests.post(url, params={"key": GEMINI_API_KEY},
-                          json=payload, timeout=60)
-        r.raise_for_status()
-        body = r.json()
-        reply = body["candidates"][0]["content"]["parts"][0]["text"]
+        for _round in range(MAX_ROUNDS):
+            payload = {
+                "systemInstruction": {"parts": [{"text": system_prompt}]},
+                "contents": contents,
+                "tools": CHAT_TOOLS,
+                "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
+            }
+            r = requests.post(url, params={"key": GEMINI_API_KEY},
+                              json=payload, timeout=60)
+            r.raise_for_status()
+            body = r.json()
+            cand = body["candidates"][0]
+            parts = cand.get("content", {}).get("parts", [])
+
+            # Collect any function calls in this turn.
+            calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            if not calls:
+                # No tool call → this is the final text answer.
+                reply = "".join(p.get("text", "") for p in parts).strip()
+                break
+
+            # Append the model's tool-call turn, then execute each call and
+            # append the results as a function-response turn.
+            contents.append({"role": "model", "parts": parts})
+            response_parts = []
+            for call in calls:
+                fname = call.get("name")
+                fargs = call.get("args", {}) or {}
+                result = _execute_chat_tool(fname, fargs, enriched)
+                tool_trace.append({"tool": fname, "args": fargs})
+                # Harvest any chart spec so the UI can render it. We strip it
+                # from what we feed back to Gemini (it doesn't need the raw
+                # arrays — it has the buckets — and it keeps the payload lean).
+                if isinstance(result, dict) and result.get("chart"):
+                    charts.append(result.pop("chart"))
+                response_parts.append({
+                    "functionResponse": {
+                        "name": fname,
+                        "response": {"result": result},
+                    }
+                })
+            contents.append({"role": "user", "parts": response_parts})
+        else:
+            # Loop exhausted without a text answer.
+            reply = ("I gathered the data but couldn't compose a final answer "
+                     "in time — try narrowing the question.")
     except requests.HTTPError as exc:
         detail = exc.response.text if exc.response is not None else str(exc)
         log.error("chat: Gemini HTTP error: %s", detail)
@@ -2197,6 +3468,9 @@ def chat():
     except Exception as exc:
         log.exception("chat: Gemini call failed")
         return jsonify({"error": str(exc)}), 502
+
+    if not reply:
+        reply = "(no response)"
 
     # Build a human-readable scope label for the UI status line. For "all",
     # include the device count; for per-MAC, find the device's current name.
@@ -2214,6 +3488,8 @@ def chat():
         "model":       model_id,
         "scope":       scope,
         "scope_label": scope_label,
+        "tools_used":  tool_trace,
+        "charts":      charts,
     })
 
 

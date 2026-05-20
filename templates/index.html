@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <title>SDN Identity Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -297,6 +298,10 @@
             <a href="#" data-target="fingerbank" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Fingerbank">
                 <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 <span class="nav-label">Fingerbank</span>
+            </a>
+            <a href="#" data-target="syslog" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Syslog / Events">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+                <span class="nav-label">Syslog / Events</span>
             </a>
 
             <div class="nav-section px-4 pt-5 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Configuration</div>
@@ -642,7 +647,76 @@
                         <button type="button" id="settings-reveal-btn" class="text-[12px] text-ink-500 hover:text-ink-900">Show full secrets</button>
                         <span id="settings-save-status" class="text-[12px] text-ink-500"></span>
                     </div>
+
                 </form>
+            </div>
+        </div>
+
+        <!-- ==================== VIEW: SYSLOG / EVENTS ==================== -->
+        <div id="view-syslog" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <h2 class="text-lg font-medium text-ink-900 mb-1">Syslog / Events</h2>
+                        <p class="text-[13px] text-ink-600">Live event stream from your Omada controller. Point its syslog export at <code class="font-mono bg-ink-100 px-1 rounded">this-host:5514</code> (UDP).</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="syslog-window" onchange="onWindowChange()" class="bg-ink-50 border border-ink-200 text-sm text-ink-900 px-2 py-1.5 rounded" title="Time window for graphs and AI analysis">
+                            <option value="15m">Last 15 min</option>
+                            <option value="1h" selected>Last hour</option>
+                            <option value="6h">Last 6 hours</option>
+                            <option value="24h">Last 24 hours</option>
+                            <option value="7d">Last 7 days</option>
+                        </select>
+                        <button onclick="loadSyslog()" class="bg-white border border-ink-300 hover:border-brand-500 hover:text-brand-700 text-ink-700 text-sm font-medium px-3 py-1.5 rounded transition">↻ Refresh</button>
+                        <button onclick="analyzeSyslog()" id="syslog-analyze-btn" class="bg-info-500 hover:opacity-90 text-white text-sm font-medium px-3 py-1.5 rounded transition" title="Ask Gemini for a network-health briefing over the selected window">✨ Analyze network</button>
+                    </div>
+                </div>
+                <div id="syslog-status-banner" class="mt-3"></div>
+            </div>
+
+            <!-- Marvis-style graphs -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="bg-white border border-ink-200 rounded p-4 lg:col-span-2">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Event activity <span id="graph-window-label" class="text-ink-400 normal-case font-normal"></span></h3>
+                    <div id="graph-timeline" class="text-ink-400 text-[12px]">Loading…</div>
+                </div>
+                <div class="bg-white border border-ink-200 rounded p-4">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Top talkers</h3>
+                    <div id="graph-talkers" class="text-ink-400 text-[12px]">Loading…</div>
+                </div>
+                <div class="bg-white border border-ink-200 rounded p-4">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Event types</h3>
+                    <div id="graph-types" class="text-ink-400 text-[12px]">Loading…</div>
+                </div>
+            </div>
+
+            <!-- AI briefing output (hidden until Analyze is clicked) -->
+            <div id="syslog-briefing" class="hidden bg-white border border-info-500/30 rounded p-5">
+                <h3 class="text-[13px] font-medium text-info-500 uppercase tracking-wide mb-2">📋 Network Health Briefing</h3>
+                <div id="syslog-briefing-body" class="text-[13px] text-ink-800 whitespace-pre-wrap leading-relaxed"></div>
+                <div id="syslog-briefing-meta" class="text-[11px] text-ink-400 mt-3"></div>
+            </div>
+
+            <!-- Filters + event table -->
+            <div class="bg-white border border-ink-200 rounded p-5">
+                <div class="flex flex-wrap items-center gap-2 mb-4">
+                    <input id="syslog-search" type="text" placeholder="Search message text…" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-900 px-3 py-1.5 rounded transition flex-1 min-w-[200px]">
+                    <select id="syslog-event-filter" class="bg-ink-50 border border-ink-200 text-sm text-ink-900 px-2 py-1.5 rounded">
+                        <option value="">All event types</option>
+                    </select>
+                    <select id="syslog-severity-filter" class="bg-ink-50 border border-ink-200 text-sm text-ink-900 px-2 py-1.5 rounded">
+                        <option value="">All severities</option>
+                        <option value="error">Error</option>
+                        <option value="warning">Warning</option>
+                        <option value="notice">Notice</option>
+                        <option value="info">Info</option>
+                    </select>
+                    <button onclick="loadSyslog()" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-3 py-1.5 rounded transition">Filter</button>
+                </div>
+                <div id="syslog-table-wrap" class="overflow-x-auto">
+                    <div class="text-center text-ink-500 text-[13px] py-12">Click Refresh to load events.</div>
+                </div>
             </div>
         </div>
 
@@ -1835,7 +1909,7 @@ PROPOSED:     ${esc(proposed)}</pre>
     }
 
     // ============== VIEW SWITCHING ==============
-    const VIEW_TITLES = { clients: 'Clients', policy: 'Naming Policy', 'ai-model': 'AI Models', dhcp: 'DHCP Capture', fingerbank: 'Fingerbank', settings: 'Settings' };
+    const VIEW_TITLES = { clients: 'Clients', policy: 'Naming Policy', 'ai-model': 'AI Models', dhcp: 'DHCP Capture', fingerbank: 'Fingerbank', settings: 'Settings', syslog: 'Syslog / Events' };
     function showView(name) {
         currentView = name;
         document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
@@ -1846,6 +1920,7 @@ PROPOSED:     ${esc(proposed)}</pre>
         if (name === 'policy') updatePolicyPreview();
         if (name === 'clients') renderTable();
         if (name === 'settings') loadSettings();
+        if (name === 'syslog') loadSyslog();
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
     document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', (e) => { e.preventDefault(); showView(item.dataset.target); }));
@@ -2278,13 +2353,35 @@ PROPOSED:     ${esc(proposed)}</pre>
     }
 
     function renderChatEmpty() {
+        // Marvis-style example queries — clicking one fills the input and sends.
+        const examples = chatScope === 'all' ? [
+            "Chart the top talkers this hour",
+            "Show event types as a breakdown",
+            "Which devices are having connectivity issues?",
+            "Which devices haven't been identified yet?",
+        ] : [
+            "Why does this device keep dropping?",
+            "Chart this device's activity over time",
+            "Show this device's roaming history",
+            "Troubleshoot this device",
+        ];
+        const chips = examples.map(q =>
+            `<button class="chat-example text-[12px] text-left bg-ink-50 hover:bg-info-50 hover:text-info-600 border border-ink-200 rounded px-3 py-1.5 transition" data-q="${esc(q)}">${esc(q)}</button>`
+        ).join('');
         document.getElementById('chat-messages').innerHTML = `
-            <div class="text-center text-ink-500 text-[13px] py-8">
-                <div class="text-3xl mb-3">💬</div>
-                <div>Ask anything about ${chatScope === 'all' ? 'your network' : 'this device'}.</div>
-                <div class="text-[11px] mt-3 text-ink-400">Try: "Which devices haven't been identified yet?" · "What does this device do?" · "Are any of my cameras still using default names?"</div>
+            <div class="text-center text-ink-500 text-[13px] py-6">
+                <div class="text-3xl mb-2">💬</div>
+                <div class="mb-1">Ask anything about ${chatScope === 'all' ? 'your network' : 'this device'}.</div>
+                <div class="text-[11px] text-ink-400 mb-4">I'll query your real syslog data to answer — counts, event histories, troubleshooting.</div>
+                <div class="flex flex-col gap-2 max-w-md mx-auto">${chips}</div>
             </div>
         `;
+        document.querySelectorAll('.chat-example').forEach(b =>
+            b.addEventListener('click', () => {
+                const input = document.getElementById('chat-input');
+                input.value = b.dataset.q;
+                sendChat();
+            }));
     }
 
     // Regex that matches MAC addresses in both colon and dash forms.
@@ -2347,9 +2444,20 @@ PROPOSED:     ${esc(proposed)}</pre>
                     `).join('')}
                 </div>
             ` : '';
+            // Chart placeholders — one canvas per chart spec, instantiated after render.
+            const charts = m.charts || [];
+            const chartHtml = charts.map((ch, ci) => `
+                <div class="mt-2 pt-2 ${ci === 0 ? 'border-t border-ink-100' : ''}">
+                    <div class="text-[11px] text-ink-500 mb-1">${esc(ch.title || 'Chart')}${ch.window_hours ? ` · last ${ch.window_hours}h` : ''}</div>
+                    <div style="position:relative;height:${ch.type === 'doughnut' ? '200px' : Math.min(40 + (ch.labels ? ch.labels.length * 26 : 120), 320) + 'px'}">
+                        <canvas id="chat-chart-${idx}-${ci}"></canvas>
+                    </div>
+                </div>
+            `).join('');
             return `<div class="flex justify-start">
                 <div class="bg-white border border-ink-200 px-3 py-2 rounded-lg max-w-[85%] text-[13px] text-ink-900">
                     <div class="whitespace-pre-wrap">${html}</div>
+                    ${chartHtml}
                     ${applyChips}
                 </div>
             </div>`;
@@ -2372,7 +2480,72 @@ PROPOSED:     ${esc(proposed)}</pre>
             ));
         });
 
+        renderChatCharts();
         list.scrollTop = list.scrollHeight;
+    }
+
+    // Hold live Chart.js instances so we can destroy them before re-render
+    // (re-rendering the message list throws away the old canvases).
+    let chatChartInstances = [];
+
+    function renderChatCharts() {
+        // Tear down any previous instances.
+        chatChartInstances.forEach(c => { try { c.destroy(); } catch (e) {} });
+        chatChartInstances = [];
+
+        const palette = ['#1f9c7a', '#3b82f6', '#8b5cf6', '#c77700', '#dc3545',
+                         '#0ea5e9', '#1a9d6f', '#9aa0aa', '#c026d3', '#0891b2'];
+
+        chatMessages.forEach((m, idx) => {
+            (m.charts || []).forEach((ch, ci) => {
+                const canvas = document.getElementById(`chat-chart-${idx}-${ci}`);
+                if (!canvas) return;
+                // Graceful fallback if Chart.js didn't load (offline host etc).
+                if (typeof Chart === 'undefined') {
+                    const wrap = canvas.parentElement;
+                    wrap.innerHTML = `<div class="text-[12px]">` +
+                        ch.labels.map((l, i) =>
+                            `<div class="flex justify-between border-b border-ink-100 py-0.5"><span>${esc(l)}</span><span class="font-mono text-ink-600">${ch.values[i]}</span></div>`
+                        ).join('') + `</div>`;
+                    return;
+                }
+                const isDoughnut = ch.type === 'doughnut';
+                const isLine = ch.type === 'line';
+                const colors = ch.labels.map((_, i) => palette[i % palette.length]);
+                const cfg = {
+                    type: ch.type,
+                    data: {
+                        labels: ch.labels,
+                        datasets: [{
+                            data: ch.values,
+                            backgroundColor: isLine ? 'rgba(59,130,246,0.12)' : (isDoughnut ? colors : '#1f9c7a'),
+                            borderColor: isLine ? '#3b82f6' : colors,
+                            borderWidth: isLine ? 1.5 : 0,
+                            fill: isLine,
+                            tension: 0.3,
+                            pointRadius: isLine ? 0 : undefined,
+                        }],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        indexAxis: (ch.type === 'bar') ? 'y' : 'x',  // horizontal bars for rankings
+                        plugins: {
+                            legend: { display: isDoughnut, position: 'right',
+                                      labels: { font: { size: 10 }, boxWidth: 10 } },
+                            tooltip: { enabled: true },
+                        },
+                        scales: isDoughnut ? {} : {
+                            x: { ticks: { font: { size: 10 } }, grid: { display: isLine } },
+                            y: { ticks: { font: { size: 10 } }, grid: { display: false }, beginAtZero: true },
+                        },
+                    },
+                };
+                try {
+                    chatChartInstances.push(new Chart(canvas.getContext('2d'), cfg));
+                } catch (e) { /* non-fatal */ }
+            });
+        });
     }
 
     // Close the chat and reveal a specific device's row + detail pane.
@@ -2450,9 +2623,12 @@ PROPOSED:     ${esc(proposed)}</pre>
             });
             const body = await r.json();
             if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-            chatMessages.push({ role: 'assistant', content: body.reply });
+            chatMessages.push({ role: 'assistant', content: body.reply, charts: body.charts || [] });
+            const toolsNote = (body.tools_used && body.tools_used.length)
+                ? ` · queried: ${body.tools_used.map(t => t.tool).join(', ')}`
+                : '';
             document.getElementById('chat-status').textContent =
-                `${body.model} · ${body.scope_label}`;
+                `${body.model} · ${body.scope_label}${toolsNote}`;
         } catch (e) {
             chatMessages.push({
                 role: 'assistant',
@@ -2471,6 +2647,311 @@ PROPOSED:     ${esc(proposed)}</pre>
         document.getElementById('chat-status').textContent =
             'Conversation is not saved — closing the modal clears history.';
         renderChatEmpty();
+    }
+
+    // ============ SYSLOG / EVENTS VIEW ============
+    const SEVERITY_TONE = {
+        emergency: 'text-danger-500', alert: 'text-danger-500', critical: 'text-danger-500',
+        error: 'text-danger-500', err: 'text-danger-500',
+        warning: 'text-warning-600', warn: 'text-warning-600',
+        notice: 'text-info-500', informational: 'text-ink-600', info: 'text-ink-600',
+        debug: 'text-ink-400',
+    };
+    const EVENT_TYPE_LABELS = {
+        client_connect: '🟢 Connect', client_disconnect: '🔴 Disconnect',
+        reconnect: '🔄 Reconnect', roamed: '↔️ Roam', roaming: '↔️ Roam',
+        auth_failed: '⚠️ Auth fail', deauth: '⛔ Deauth', dhcp: '📍 DHCP',
+        online: '🟢 Online', offline: '🔴 Offline', other: '· Other',
+    };
+
+    async function loadSyslog() {
+        loadSyslogGraphs();
+        // Status banner
+        try {
+            const sr = await fetch('/api/syslog/status');
+            const s = await sr.json();
+            renderSyslogStatus(s);
+            // Populate the event-type filter from the actual data
+            const sel = document.getElementById('syslog-event-filter');
+            if (sel && s.by_type) {
+                const current = sel.value;
+                const types = Object.keys(s.by_type).sort();
+                sel.innerHTML = '<option value="">All event types</option>' +
+                    types.map(t => `<option value="${esc(t)}">${esc(EVENT_TYPE_LABELS[t] || t)} (${s.by_type[t]})</option>`).join('');
+                sel.value = current;
+            }
+        } catch (e) { /* non-fatal */ }
+
+        // Events table with current filters
+        const wrap = document.getElementById('syslog-table-wrap');
+        wrap.innerHTML = '<div class="text-center text-ink-500 text-[13px] py-12">Loading events…</div>';
+        const params = new URLSearchParams();
+        const q = document.getElementById('syslog-search').value.trim();
+        const et = document.getElementById('syslog-event-filter').value;
+        const sev = document.getElementById('syslog-severity-filter').value;
+        if (q) params.set('q', q);
+        if (et) params.set('event_type', et);
+        if (sev) params.set('severity', sev);
+        params.set('limit', '300');
+        try {
+            const r = await fetch('/api/syslog/events?' + params.toString());
+            const data = await r.json();
+            renderSyslogTable(data.events || []);
+        } catch (e) {
+            wrap.innerHTML = `<div class="text-center text-danger-500 text-[13px] py-12">Failed to load: ${esc(e.message || e)}</div>`;
+        }
+    }
+
+    function currentSyslogWindow() {
+        return document.getElementById('syslog-window')?.value || '1h';
+    }
+
+    function onWindowChange() {
+        // Reload graphs (and the briefing is re-run on demand with the new window)
+        loadSyslogGraphs();
+    }
+
+    // Event-type → colour for the charts (Omada palette-ish)
+    const TYPE_COLORS = {
+        traffic_flow: '#9aa0aa', client_connect: '#1a9d6f', client_disconnect: '#dc3545',
+        reconnect: '#3b82f6', roamed: '#8b5cf6', roaming: '#8b5cf6',
+        auth_failed: '#c77700', deauth: '#dc3545', dhcp: '#0ea5e9',
+        online: '#1a9d6f', offline: '#dc3545', other: '#cbd0d6',
+    };
+
+    async function loadSyslogGraphs() {
+        const win = currentSyslogWindow();
+        const label = document.getElementById('graph-window-label');
+        if (label) label.textContent = `· ${document.querySelector('#syslog-window option:checked')?.textContent || win}`;
+        ['graph-timeline', 'graph-talkers', 'graph-types'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = '<span class="text-ink-400">Loading…</span>';
+        });
+        try {
+            const r = await fetch('/api/syslog/graphs?window=' + encodeURIComponent(win));
+            const g = await r.json();
+            renderTimelineGraph(g);
+            renderTalkersGraph(g);
+            renderTypesGraph(g);
+        } catch (e) {
+            const el = document.getElementById('graph-timeline');
+            if (el) el.innerHTML = `<span class="text-danger-500">Failed to load graphs: ${esc(e.message || e)}</span>`;
+        }
+    }
+
+    function renderTimelineGraph(g) {
+        const el = document.getElementById('graph-timeline');
+        const pts = g.timeline || [];
+        if (pts.length < 2) {
+            el.innerHTML = `<div class="py-8 text-center text-ink-400">${g.total || 0} events — not enough spread to chart yet.</div>`;
+            return;
+        }
+        const W = 760, H = 140, padL = 32, padR = 8, padT = 8, padB = 18;
+        const maxV = Math.max(...pts.map(p => p.total), 1);
+        const x0 = pts[0].t, x1 = pts[pts.length - 1].t;
+        const span = Math.max(1, x1 - x0);
+        const xFor = t => padL + ((t - x0) / span) * (W - padL - padR);
+        const yFor = v => H - padB - (v / maxV) * (H - padT - padB);
+        // Stacked area: lifecycle on top of flow
+        const flowArea = pts.map(p => `${xFor(p.t).toFixed(1)},${yFor(p.flow).toFixed(1)}`).join(' ');
+        const totalLine = pts.map((p, i) => `${i ? 'L' : 'M'}${xFor(p.t).toFixed(1)} ${yFor(p.total).toFixed(1)}`).join(' ');
+        const flowLine = pts.map((p, i) => `${i ? 'L' : 'M'}${xFor(p.t).toFixed(1)} ${yFor(p.flow).toFixed(1)}`).join(' ');
+        const baseY = yFor(0);
+        const totalArea = `M${xFor(x0).toFixed(1)} ${baseY} ` +
+            pts.map(p => `L${xFor(p.t).toFixed(1)} ${yFor(p.total).toFixed(1)}`).join(' ') +
+            ` L${xFor(x1).toFixed(1)} ${baseY} Z`;
+        const fmtTime = epoch => {
+            const d = new Date(epoch * 1000);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        };
+        el.innerHTML = `
+            <svg width="100%" viewBox="0 0 ${W} ${H}" class="block">
+                <path d="${totalArea}" fill="#3b82f6" fill-opacity="0.10"/>
+                <path d="${totalLine}" fill="none" stroke="#3b82f6" stroke-width="1.5"/>
+                <path d="${flowLine}" fill="none" stroke="#9aa0aa" stroke-width="1" stroke-dasharray="3 2"/>
+                <text x="${padL}" y="${padT + 8}" font-size="9" fill="#8b9099">${maxV}</text>
+                <text x="${padL}" y="${fmtTime ? H - 4 : 0}" font-size="9" fill="#8b9099">${fmtTime(x0)}</text>
+                <text x="${W - padR}" y="${H - 4}" font-size="9" fill="#8b9099" text-anchor="end">${fmtTime(x1)}</text>
+            </svg>
+            <div class="flex gap-4 text-[11px] text-ink-500 mt-1">
+                <span><span style="display:inline-block;width:10px;height:2px;background:#3b82f6;vertical-align:middle"></span> total/bucket</span>
+                <span><span style="display:inline-block;width:10px;height:0;border-top:2px dashed #9aa0aa;vertical-align:middle"></span> traffic flows</span>
+                <span class="text-ink-400">${g.total} events · ${g.bucket_seconds}s buckets</span>
+            </div>`;
+    }
+
+    function renderTalkersGraph(g) {
+        const el = document.getElementById('graph-talkers');
+        const rows = (g.top_talkers || []).slice(0, 8);
+        if (!rows.length) { el.innerHTML = '<div class="py-6 text-center text-ink-400">No client activity in this window.</div>'; return; }
+        const max = Math.max(...rows.map(r => r.events), 1);
+        el.innerHTML = rows.map(r => {
+            const apBadge = r.is_ap ? '<span class="text-[9px] bg-info-50 text-info-500 border border-info-500/20 px-1 rounded ml-1 align-middle">AP</span>' : '';
+            const label = (r.name ? esc(r.name) : `<span class="font-mono text-[11px]">${esc(r.mac)}</span>`) + apBadge;
+            const pct = (r.events / max * 100).toFixed(1);
+            const known = (currentClients || []).some(c => normalizeMac(c.mac) === normalizeMac(r.mac));
+            const clickable = known ? ` style="cursor:pointer" onclick="jumpToDevice('${esc(normalizeMac(r.mac))}')"` : '';
+            const barColor = r.is_ap ? 'bg-info-500' : 'bg-brand-500';
+            return `<div class="mb-1.5"${clickable}>
+                <div class="flex justify-between text-[12px] mb-0.5"><span class="${known ? 'text-brand-700' : 'text-ink-700'}">${label}</span><span class="text-ink-500">${r.events}</span></div>
+                <div class="h-1.5 bg-ink-100 rounded overflow-hidden"><div class="h-full ${barColor}" style="width:${pct}%"></div></div>
+            </div>`;
+        }).join('');
+    }
+
+    function renderTypesGraph(g) {
+        const el = document.getElementById('graph-types');
+        const entries = Object.entries(g.by_type || {}).sort((a, b) => b[1] - a[1]);
+        if (!entries.length) { el.innerHTML = '<div class="py-6 text-center text-ink-400">No events in this window.</div>'; return; }
+        const total = entries.reduce((s, [, n]) => s + n, 0);
+        // Horizontal stacked bar + legend
+        let x = 0;
+        const segs = entries.map(([t, n]) => {
+            const w = (n / total * 100);
+            const seg = `<div style="width:${w}%;background:${TYPE_COLORS[t] || '#cbd0d6'}" class="h-full" title="${esc(t)}: ${n}"></div>`;
+            x += w; return seg;
+        }).join('');
+        const legend = entries.map(([t, n]) => `
+            <div class="flex items-center gap-1.5 text-[11px] text-ink-600">
+                <span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${TYPE_COLORS[t] || '#cbd0d6'}"></span>
+                ${esc(EVENT_TYPE_LABELS[t] || t)} <span class="text-ink-400">${n} (${(n/total*100).toFixed(0)}%)</span>
+            </div>`).join('');
+        el.innerHTML = `
+            <div class="flex h-3 rounded overflow-hidden mb-3">${segs}</div>
+            <div class="grid grid-cols-2 gap-x-3 gap-y-1">${legend}</div>`;
+    }
+
+    function renderSyslogStatus(s) {
+        const el = document.getElementById('syslog-status-banner');
+        let dot, bg, msg;
+        const stored = s.stored_events || 0;
+        if (!s.enabled) {
+            dot = 'bg-ink-400'; bg = 'bg-ink-50 border-ink-200 text-ink-600';
+            msg = `Syslog ingestion disabled · ${stored} events stored`;
+        } else if (s.error) {
+            dot = 'bg-danger-500'; bg = 'bg-danger-50 border-danger-500/30 text-danger-600';
+            msg = `Syslog error: ${s.error}`;
+        } else if (s.running) {
+            const src = s.last_source_ip ? ` from ${s.last_source_ip}` : '';
+            if ((s.events_received || 0) === 0 && stored === 0) {
+                // Truly nothing — fresh listener, no history.
+                dot = 'bg-warning-500 animate-pulse'; bg = 'bg-warning-50 border-warning-500/30 text-warning-600';
+                msg = `Listening on UDP/${s.listen_port} · no events yet · point Omada syslog here`;
+            } else if ((s.events_received || 0) === 0 && stored > 0) {
+                // Restarted process: in-memory counter is zero but we have history.
+                dot = 'bg-success-500'; bg = 'bg-success-50 border-success-500/30 text-success-600';
+                msg = `Live on UDP/${s.listen_port} · ${stored} events stored (cap ${s.max_rows}) · none since restart`;
+            } else {
+                dot = 'bg-success-500'; bg = 'bg-success-50 border-success-500/30 text-success-600';
+                msg = `Live on UDP/${s.listen_port}${src} · ${s.events_received} received · ${stored} stored (cap ${s.max_rows})`;
+            }
+        } else {
+            dot = 'bg-warning-500'; bg = 'bg-warning-50 border-warning-500/30 text-warning-600';
+            msg = `Syslog listener starting on UDP/${s.listen_port}…`;
+        }
+        // Drop-traffic-flow toggle + dropped counter.
+        const dropOn = !!s.drop_traffic_flow;
+        const droppedNote = (s.dropped_flows || 0) > 0
+            ? ` · <span class="text-ink-400">${s.dropped_flows.toLocaleString()} flows dropped</span>` : '';
+        const toggle = `
+            <label class="flex items-center gap-1.5 text-[12px] text-ink-600 cursor-pointer ml-auto whitespace-nowrap" title="Drop high-volume firewall/flow logs at ingest; keep only lifecycle events">
+                <input type="checkbox" id="drop-flow-toggle" ${dropOn ? 'checked' : ''} onchange="toggleDropFlow(this.checked)" class="accent-brand-500">
+                Drop traffic-flow logs${droppedNote}
+            </label>`;
+        el.innerHTML = `<div class="${bg} border text-[12px] px-3 py-2 rounded flex items-center gap-2"><span class="dot ${dot}"></span>${esc(msg)}${toggle}</div>`;
+    }
+
+    async function toggleDropFlow(enabled) {
+        try {
+            await fetch('/api/syslog/drop_flow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            });
+            // Refresh status + graphs so counts reflect the change going forward.
+            loadSyslog();
+        } catch (e) { /* non-fatal */ }
+    }
+
+    function renderSyslogTable(events) {
+        const wrap = document.getElementById('syslog-table-wrap');
+        if (!events.length) {
+            wrap.innerHTML = '<div class="text-center text-ink-500 text-[13px] py-12">No events match the current filters.</div>';
+            return;
+        }
+        const rows = events.map(e => {
+            const tone = SEVERITY_TONE[(e.severity || '').toLowerCase()] || 'text-ink-600';
+            const evLabel = EVENT_TYPE_LABELS[e.event_type] || esc(e.event_type || '—');
+            // Make a known client MAC clickable → jump to its row
+            let macCell = '—';
+            if (e.client_mac) {
+                const known = (currentClients || []).some(c => normalizeMac(c.mac) === normalizeMac(e.client_mac));
+                macCell = known
+                    ? `<button class="syslog-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted" data-mac="${esc(e.client_mac)}">${esc(e.client_mac)}</button>`
+                    : `<span class="font-mono text-ink-500">${esc(e.client_mac)}</span>`;
+            }
+            return `<tr class="border-b border-ink-100 hover:bg-ink-50/50">
+                <td class="px-2 py-1.5 text-[11px] text-ink-500 whitespace-nowrap font-mono">${esc(formatDateShort(e.received_at))}</td>
+                <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${evLabel}</td>
+                <td class="px-2 py-1.5 text-[11px] ${tone} uppercase whitespace-nowrap">${esc(e.severity || '—')}</td>
+                <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${macCell}</td>
+                <td class="px-2 py-1.5 text-[12px] text-ink-500 whitespace-nowrap">${esc(e.ssid || '—')}</td>
+                <td class="px-2 py-1.5 text-[12px] text-ink-800">${esc(e.message || '')}</td>
+            </tr>`;
+        }).join('');
+        wrap.innerHTML = `
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-ink-200 text-[10px] text-ink-500 uppercase tracking-wide text-left">
+                        <th class="px-2 py-2 font-medium">Time</th>
+                        <th class="px-2 py-2 font-medium">Event</th>
+                        <th class="px-2 py-2 font-medium">Severity</th>
+                        <th class="px-2 py-2 font-medium">Client</th>
+                        <th class="px-2 py-2 font-medium">SSID</th>
+                        <th class="px-2 py-2 font-medium">Message</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+            <div class="text-[11px] text-ink-400 mt-3">${events.length} events shown (newest first)</div>`;
+        // Wire MAC links
+        wrap.querySelectorAll('.syslog-mac-link').forEach(btn => {
+            btn.addEventListener('click', () => jumpToDevice(btn.dataset.mac));
+        });
+    }
+
+    async function analyzeSyslog() {
+        const btn = document.getElementById('syslog-analyze-btn');
+        const briefing = document.getElementById('syslog-briefing');
+        const body = document.getElementById('syslog-briefing-body');
+        const meta = document.getElementById('syslog-briefing-meta');
+        const orig = btn.innerHTML;
+        btn.disabled = true; btn.innerHTML = '⏳ Analyzing…';
+        briefing.classList.remove('hidden');
+        body.textContent = 'Gemini is reviewing recent events and the client inventory…';
+        meta.textContent = '';
+        try {
+            const r = await fetch('/api/syslog/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ window: currentSyslogWindow() }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            body.innerHTML = esc(data.briefing || '(no output)')
+                .replace(/`([^`]+)`/g, '<code class="font-mono bg-ink-100 px-1 rounded">$1</code>')
+                .replace(MAC_RE, (m) => {
+                    const known = (currentClients || []).some(c => normalizeMac(c.mac) === normalizeMac(m));
+                    return known ? `<button class="syslog-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted" data-mac="${esc(normalizeMac(m))}">${esc(m)}</button>` : m;
+                });
+            meta.textContent = `${data.model || 'gemini'} · analyzed ${data.events_analyzed || 0} events · ${data.window || ''}`;
+            body.querySelectorAll('.syslog-mac-link').forEach(b =>
+                b.addEventListener('click', () => jumpToDevice(b.dataset.mac)));
+        } catch (e) {
+            body.innerHTML = `<span class="text-danger-500">Analysis failed: ${esc(e.message || e)}</span>`;
+        } finally {
+            btn.disabled = false; btn.innerHTML = orig;
+        }
     }
 
     // ============== INIT ==============
