@@ -52,6 +52,19 @@ _RFC5424_RE = re.compile(
     r"(?P<msgid>\S+)\s+"
     r"(?P<rest>.*)$"
 )
+# TP-Link/Omada variant: uses a SPACE-separated "YYYY-MM-DD HH:MM:SS" timestamp
+# instead of a single ISO token, which shifts every field by one in the strict
+# RFC5424 regex above. Match this shape explicitly so HOSTNAME/APP map right.
+#   <134>1 2026-05-21 09:30:20 Prowse - - - DHCP Server allocated ...
+_RFC5424_OMADA_RE = re.compile(
+    r"^<(?P<pri>\d{1,3})>(?P<ver>\d)\s+"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<host>\S+)\s+"
+    r"(?P<app>\S+)\s+"
+    r"(?P<procid>\S+)\s+"
+    r"(?P<msgid>\S+)\s+"
+    r"(?P<rest>.*)$"
+)
 
 # MAC in either colon or dash form, anywhere in the message.
 _MAC_RE = re.compile(r"\b([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b")
@@ -155,12 +168,17 @@ def parse_syslog(raw: str, source_ip: str) -> dict:
     }
 
     # Try RFC 5424 first (has explicit version digit after PRI), then 3164.
-    m = _RFC5424_RE.match(raw)
+    # The Omada variant (space-separated date+time) must be tried before the
+    # strict RFC5424 regex, which would otherwise mis-align every field.
+    m = _RFC5424_OMADA_RE.match(raw) or _RFC5424_RE.match(raw)
     if m:
         event["pri"] = int(m.group("pri"))
         event["syslog_ts"] = m.group("ts")
-        event["hostname"] = m.group("host")
-        event["tag"] = m.group("app")
+        # A bare "-" is RFC5424's nil value; treat it as empty, not literal.
+        host = m.group("host")
+        app = m.group("app")
+        event["hostname"] = None if host == "-" else host
+        event["tag"] = None if app == "-" else app
         event["message"] = m.group("rest")[:2000]
     else:
         m = _RFC3164_RE.match(raw)

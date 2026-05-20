@@ -284,6 +284,12 @@ Your SQLite database in `./instance/` persists across upgrades, so all your save
 
 ## Changelog
 
+### 0.2.2
+- **Device identity in the event stream** — the events table CLIENT column now leads with the resolved device name (with the MAC underneath and a type note), not a bare MAC. Identity is batch-resolved in one query across the result set. Expanded event detail shows an Identity block (name, type, vendor, AP flag).
+- **Bidirectional log ↔ client linking** — clicking an identified host in the log jumps to the Clients view and expands that device; the client detail pane gains a "Recent Log Events" section plus a "View in Syslog →" link that filters the event stream to that device.
+- **Fixed TP-Link RFC5424 parsing** — the controller sends a space-separated `YYYY-MM-DD HH:MM:SS` timestamp (not a single ISO token), which shifted every field by one and mis-mapped the hostname to a time and the tag to the controller name. Now parsed correctly, with bare `-` treated as the RFC5424 nil value.
+- **Webhook header auth** — `access_token` HTTP header (Omada's native method) now accepted alongside `shardSecret` body field and URL path token.
+
 ### 0.2.1
 - **Webhook receiver** (`POST /api/webhook`, optional `/api/webhook/<token>`) — ingests Omada controller notifications (device disconnected, WAN down, rogue DHCP, IP/ARP conflict, STP changes, loops, storms, attacks, link/CPU/memory alerts) into the same event store, so they appear in graphs, the briefing, and the chatbot. Configure in Omada: Logs → Notifications → enable Webhook, payload template "Omada", URL `http://THIS-HOST:8082/api/webhook`.
 - **Three-way webhook auth** — when `WEBHOOK_TOKEN` is set, the token is accepted from the `access_token` header (Omada's native method), the `shardSecret` body field, or the URL path.

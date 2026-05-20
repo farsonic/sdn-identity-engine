@@ -673,6 +673,12 @@
                     </div>
                 </div>
                 <div id="syslog-status-banner" class="mt-3"></div>
+                <div id="syslog-macfilter-banner" class="mt-2 hidden">
+                    <div class="inline-flex items-center gap-2 bg-brand-50 border border-brand-500/30 text-brand-700 text-[12px] px-3 py-1.5 rounded">
+                        <span>Filtered to device: <span class="macfilter-label font-mono"></span></span>
+                        <button onclick="clearSyslogMacFilter()" class="text-brand-600 hover:text-brand-800 font-medium">✕ clear</button>
+                    </div>
+                </div>
             </div>
 
             <!-- Marvis-style graphs -->
@@ -1467,6 +1473,8 @@
                 if (r.dataset.mac === macAttr) {
                     document.querySelectorAll('.detail-pane').forEach(x => x.classList.remove('expanded'));
                     r.classList.add('expanded');
+                    // Also load its recent events (this path bypasses toggleRow)
+                    if (r.dataset.mac) loadDeviceEvents(r.dataset.mac, r);
                     break;
                 }
             }
@@ -1571,6 +1579,15 @@ PROPOSED:     ${esc(proposed)}</pre>
                             ${renderAIBlock(c.ai_data, c.ai_analyzed_at, c.mac)}
                         </div>
                         <div class="bg-white border border-ink-200 rounded p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="text-ink-700 text-xs font-semibold uppercase tracking-wide">📋 Recent Log Events</h4>
+                                <button class="device-events-link text-[11px] text-brand-600 hover:underline" data-mac="${macAttr}">View in Syslog →</button>
+                            </div>
+                            <div class="device-events-wrap" data-mac="${macAttr}">
+                                <div class="text-[12px] text-ink-400">Loading recent events…</div>
+                            </div>
+                        </div>
+                        <div class="bg-white border border-ink-200 rounded p-4">
                             <h4 class="text-ink-700 text-xs font-semibold uppercase tracking-wide mb-3">curl Equivalents</h4>
                             ${renderCurlBlock(c.curl)}
                         </div>
@@ -1588,6 +1605,10 @@ PROPOSED:     ${esc(proposed)}</pre>
         list.querySelectorAll('.int-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); refreshFB(e.currentTarget.dataset.mac); }));
         list.querySelectorAll('.ai-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); runAI(e.currentTarget.dataset.mac, e.currentTarget); }));
         list.querySelectorAll('.push-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; manualPush(t.dataset.mac, t.dataset.name, t); }));
+        list.querySelectorAll('.device-events-link').forEach(b => b.addEventListener('click', e => {
+            e.stopPropagation();
+            jumpToSyslogForDevice(e.currentTarget.dataset.mac);
+        }));
         list.querySelectorAll('.push-ai-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; manualPush(t.dataset.mac, t.dataset.name, t); }));
         list.querySelectorAll('.copy-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const pre = document.getElementById(e.currentTarget.dataset.target); if (pre) copyToClipboard(pre.innerText, e.currentTarget); }));
         list.querySelectorAll('.save-notes-btn').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); const t = e.currentTarget; const ta = list.querySelector(`textarea.notes-input[data-mac="${t.dataset.mac}"]`); saveNotes(t.dataset.mac, ta.value, t); }));
@@ -1893,7 +1914,40 @@ PROPOSED:     ${esc(proposed)}</pre>
         const el = document.getElementById(id);
         const isVis = el.classList.contains('expanded');
         document.querySelectorAll('.detail-pane').forEach(r => r.classList.remove('expanded'));
-        if (!isVis) el.classList.add('expanded');
+        if (!isVis) {
+            el.classList.add('expanded');
+            // Lazy-load this device's recent log events (the reverse link from
+            // syslog → client; identity made bidirectional). Scope the lookup
+            // to this row so we don't depend on attribute-selector escaping.
+            const mac = el.dataset.mac;
+            if (mac) loadDeviceEvents(mac, el);
+        }
+    }
+
+    async function loadDeviceEvents(mac, rootEl) {
+        const root = rootEl || document;
+        const wrap = root.querySelector('.device-events-wrap');
+        if (!wrap) return;
+        try {
+            const r = await fetch('/api/syslog/events?limit=15&mac=' + encodeURIComponent(mac));
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const data = await r.json();
+            const events = data.events || [];
+            if (!events.length) {
+                wrap.innerHTML = '<div class="text-[12px] text-ink-400">No log events recorded for this device yet.</div>';
+                return;
+            }
+            wrap.innerHTML = `<div class="space-y-1">${events.map(e => {
+                const label = EVENT_TYPE_LABELS[e.event_type] || esc(e.event_type || '—');
+                return `<div class="flex gap-3 text-[11px] border-b border-ink-50 pb-1">
+                    <span class="text-ink-400 font-mono whitespace-nowrap w-32 shrink-0">${esc(formatDateShort(e.received_at))}</span>
+                    <span class="whitespace-nowrap">${label}</span>
+                    <span class="text-ink-700 truncate" title="${esc(e.message || '')}">${esc(e.message || '')}</span>
+                </div>`;
+            }).join('')}</div>`;
+        } catch (err) {
+            wrap.innerHTML = `<div class="text-[12px] text-danger-500">Couldn't load events: ${esc(err.message || err)}</div>`;
+        }
     }
 
     async function toggleAuto(mac, state) { await fetch('/api/toggle_auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac, state }) }); }
@@ -2564,6 +2618,31 @@ PROPOSED:     ${esc(proposed)}</pre>
         }, 100);
     }
 
+    let syslogMacFilter = null;
+
+    function jumpToSyslogForDevice(mac) {
+        syslogMacFilter = mac;
+        showView('syslog');
+        setTimeout(() => {
+            const search = document.getElementById('syslog-search');
+            if (search) search.value = '';
+            loadSyslog();
+            // Show a clearable filter chip so it's obvious we're scoped
+            const banner = document.getElementById('syslog-macfilter-banner');
+            if (banner) {
+                banner.classList.remove('hidden');
+                banner.querySelector('.macfilter-label').textContent = mac;
+            }
+        }, 100);
+    }
+
+    function clearSyslogMacFilter() {
+        syslogMacFilter = null;
+        const banner = document.getElementById('syslog-macfilter-banner');
+        if (banner) banner.classList.add('hidden');
+        loadSyslog();
+    }
+
     // Save an assistant message as the owner notes for a specific device.
     // Re-asks the user to confirm if the device already has notes (so we
     // don't silently destroy a hand-written note with chat output).
@@ -2703,6 +2782,7 @@ PROPOSED:     ${esc(proposed)}</pre>
         if (q) params.set('q', q);
         if (et) params.set('event_type', et);
         if (sev) params.set('severity', sev);
+        if (syslogMacFilter) params.set('mac', syslogMacFilter);
         params.set('limit', '300');
         try {
             const r = await fetch('/api/syslog/events?' + params.toString());
@@ -2898,19 +2978,33 @@ PROPOSED:     ${esc(proposed)}</pre>
         const rows = events.map((e, idx) => {
             const tone = SEVERITY_TONE[(e.severity || '').toLowerCase()] || 'text-ink-600';
             const evLabel = EVENT_TYPE_LABELS[e.event_type] || esc(e.event_type || '—');
-            // Make a known client MAC clickable → jump to its row
+            // CLIENT cell: lead with identity (name + type), MAC underneath.
+            // The whole cell links to the device when we know it.
             let macCell = '—';
             if (e.client_mac) {
-                const known = (currentClients || []).some(c => normalizeMac(c.mac) === normalizeMac(e.client_mac));
-                macCell = known
-                    ? `<button class="syslog-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted" data-mac="${esc(e.client_mac)}">${esc(e.client_mac)}</button>`
-                    : `<span class="font-mono text-ink-500">${esc(e.client_mac)}</span>`;
+                const apBadge = e.client_is_ap
+                    ? ' <span class="text-[9px] bg-info-50 text-info-500 border border-info-500/20 px-1 rounded align-middle">AP</span>' : '';
+                if (e.client_name) {
+                    const typeNote = e.client_type ? `<span class="text-ink-400"> · ${esc(e.client_type)}</span>` : '';
+                    const inner = `<div class="leading-tight">
+                        <div class="${e.client_is_ap ? 'text-info-600' : 'text-brand-700'} font-medium">${esc(e.client_name)}${apBadge}${typeNote}</div>
+                        <div class="font-mono text-[10px] text-ink-400">${esc(e.client_mac)}</div>
+                    </div>`;
+                    macCell = e.client_known
+                        ? `<button class="syslog-mac-link text-left hover:opacity-75 transition" data-mac="${esc(e.client_mac)}" title="View this device">${inner}</button>`
+                        : inner;
+                } else {
+                    // Unidentified — just the MAC, linkable only if known
+                    macCell = e.client_known
+                        ? `<button class="syslog-mac-link font-mono text-brand-700 hover:text-brand-600 underline decoration-dotted" data-mac="${esc(e.client_mac)}">${esc(e.client_mac)}${apBadge}</button>`
+                        : `<span class="font-mono text-ink-500">${esc(e.client_mac)}${apBadge}</span>`;
+                }
             }
             return `<tr class="syslog-row border-b border-ink-100 hover:bg-ink-50/50 cursor-pointer" data-idx="${idx}" title="Click to see full payload">
                 <td class="px-2 py-1.5 text-[11px] text-ink-500 whitespace-nowrap font-mono">${esc(formatDateShort(e.received_at))}</td>
                 <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${evLabel}</td>
                 <td class="px-2 py-1.5 text-[11px] ${tone} uppercase whitespace-nowrap">${esc(e.severity || '—')}</td>
-                <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${macCell}</td>
+                <td class="px-2 py-1.5 text-[12px]">${macCell}</td>
                 <td class="px-2 py-1.5 text-[12px] text-ink-500 whitespace-nowrap">${esc(e.ssid || '—')}</td>
                 <td class="px-2 py-1.5 text-[12px] text-ink-800">${esc(e.message || '')}</td>
             </tr>
@@ -2958,8 +3052,27 @@ PROPOSED:     ${esc(proposed)}</pre>
         } catch (_) { /* not JSON, show as-is */ }
         const field = (label, val) => val
             ? `<div class="flex gap-2"><span class="text-ink-400 w-24 shrink-0">${label}</span><span class="text-ink-800 font-mono break-all">${esc(String(val))}</span></div>` : '';
+        // Identity block — the whole point of the system: who is this device?
+        let identityBlock = '';
+        if (e.client_mac) {
+            const idName = e.client_name
+                ? `<button class="text-brand-700 font-medium hover:underline" onclick="jumpToDevice('${esc(e.client_mac)}')">${esc(e.client_name)}</button>`
+                : '<span class="text-ink-400">Unidentified device</span>';
+            const bits = [
+                e.client_type ? esc(e.client_type) : null,
+                e.client_vendor ? esc(e.client_vendor) : null,
+                e.client_is_ap ? 'Access Point' : null,
+            ].filter(Boolean).join(' · ');
+            identityBlock = `
+                <div class="mb-2 pb-2 border-b border-ink-200">
+                    <div class="text-ink-400 mb-0.5">Identity</div>
+                    <div class="text-[13px]">${idName}${bits ? ` <span class="text-ink-400 text-[11px]">${bits}</span>` : ''}</div>
+                    ${e.client_known ? `<button class="text-[11px] text-brand-600 hover:underline mt-0.5" onclick="jumpToDevice('${esc(e.client_mac)}')">View device & all its events →</button>` : ''}
+                </div>`;
+        }
         cell.innerHTML = `
             <div class="py-3 text-[11px] space-y-3">
+                ${identityBlock}
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
                     ${field('Event type', e.event_type)}
                     ${field('Severity', e.severity)}

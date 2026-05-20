@@ -2130,6 +2130,37 @@ def syslog_events():
         q = q.filter(SyslogEvent.message.ilike(f"%{text}%"))
     limit = min(int(request.args.get("limit", 200)), 2000)
     rows = q.order_by(SyslogEvent.id.desc()).limit(limit).all()
+
+    # Batch-resolve identity for all distinct client MACs in one pass, rather
+    # than a DB hit per row — this is the whole point of the product, so every
+    # log line should carry the device's name/type, not just a bare MAC.
+    macs = {r.client_mac for r in rows if r.client_mac}
+    identity = {}
+    if macs:
+        settings = {s.mac: s for s in
+                    DeviceSetting.query.filter(DeviceSetting.mac.in_(macs)).all()}
+        ap_names = get_ap_names()
+        for m in macs:
+            name = type_ = vendor = None
+            s = settings.get(m)
+            if s:
+                name = s.last_synced_name
+                if s.ai_analysis:
+                    try:
+                        ai = json.loads(s.ai_analysis)
+                        name = name or ai.get("short_name") or ai.get("brief_description")
+                        type_ = ai.get("device_type") or ai.get("type")
+                        vendor = ai.get("vendor") or ai.get("manufacturer")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                vendor = vendor or getattr(s, "oui_vendor", None)
+            is_ap = m in ap_names
+            if is_ap and not name:
+                name, type_ = ap_names[m], type_ or "Access Point"
+            # "known" = present in the live client list / has settings → linkable
+            identity[m] = {"name": name, "type": type_, "vendor": vendor,
+                           "is_ap": is_ap, "known": s is not None or is_ap}
+
     return jsonify({
         "count": len(rows),
         "events": [{
@@ -2149,6 +2180,12 @@ def syslog_events():
             "source_ip": r.source_ip,
             "tag": r.tag,
             "raw": r.raw,
+            # Resolved identity (None when unknown)
+            "client_name": (identity.get(r.client_mac) or {}).get("name"),
+            "client_type": (identity.get(r.client_mac) or {}).get("type"),
+            "client_vendor": (identity.get(r.client_mac) or {}).get("vendor"),
+            "client_is_ap": (identity.get(r.client_mac) or {}).get("is_ap", False),
+            "client_known": (identity.get(r.client_mac) or {}).get("known", False),
         } for r in rows],
     })
 
