@@ -107,7 +107,37 @@ db_path = os.path.join(app.root_path, "instance", "settings.db")
 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# SQLite concurrency hardening. The app has a busy background writer (the
+# syslog capture thread commits on every stored event) running alongside
+# interactive dashboard reads. In SQLite's default rollback-journal mode a
+# writer takes an exclusive lock over the whole file, so a concurrent reader
+# or writer fails immediately with "database is locked". WAL mode lets readers
+# and a single writer coexist, and busy_timeout makes a contended connection
+# wait rather than erroring instantly. check_same_thread=False is required
+# because connections are shared across Flask's threaded request handlers and
+# the capture thread.
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "connect_args": {"check_same_thread": False, "timeout": 30},
+    "pool_pre_ping": True,
+}
 db = SQLAlchemy(app)
+
+# Apply pragmas on every new raw SQLite connection. Listening on the base
+# Engine class (rather than db.engine, which requires an app context at import
+# time) fires for the connection regardless of when the engine is created.
+from sqlalchemy import event as _sa_event
+from sqlalchemy.engine import Engine as _SA_Engine
+import sqlite3 as _sqlite3
+
+@_sa_event.listens_for(_SA_Engine, "connect")
+def _set_sqlite_pragmas(dbapi_conn, _rec):
+    if isinstance(dbapi_conn, _sqlite3.Connection):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")     # readers + 1 writer concurrently
+        cur.execute("PRAGMA busy_timeout=30000")   # wait up to 30s for a lock
+        cur.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, much faster
+        cur.close()
+
 
 
 class GlobalSetting(db.Model):
@@ -552,7 +582,14 @@ def _store_syslog_event(event: dict) -> None:
             setting = db.session.get(DeviceSetting, mac)
             if setting is not None:
                 setting.last_seen = event.get("received_at")
-        db.session.commit()
+        try:
+            db.session.commit()
+        except Exception:
+            # WAL + busy_timeout makes this rare, but never let a transient DB
+            # lock kill the long-lived capture thread — roll back and move on.
+            db.session.rollback()
+            log.warning("Syslog event commit failed (rolled back); dropping one event", exc_info=False)
+            return
 
         _syslog_event_count += 1
         # Prune every 500 events rather than on every insert.

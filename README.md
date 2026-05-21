@@ -285,6 +285,7 @@ Your SQLite database in `./instance/` persists across upgrades, so all your save
 ## Changelog
 
 ### 0.2.2
+- **Fixed "database is locked" errors under load** — SQLite now runs in WAL mode with a 30s busy-timeout and `synchronous=NORMAL`, so the background syslog writer and interactive dashboard reads no longer contend for an exclusive lock. The syslog commit path is also rollback-guarded so a transient lock can never kill the capture thread. (WAL creates `settings.db-wal`/`-shm` sidecar files in `instance/`; both are gitignored.)
 - **Device identity in the event stream** — the events table CLIENT column now leads with the resolved device name (with the MAC underneath and a type note), not a bare MAC. Identity is batch-resolved in one query across the result set. Expanded event detail shows an Identity block (name, type, vendor, AP flag).
 - **Bidirectional log ↔ client linking** — clicking an identified host in the log jumps to the Clients view and expands that device; the client detail pane gains a "Recent Log Events" section plus a "View in Syslog →" link that filters the event stream to that device.
 - **Fixed TP-Link RFC5424 parsing** — the controller sends a space-separated `YYYY-MM-DD HH:MM:SS` timestamp (not a single ISO token), which shifted every field by one and mis-mapped the hostname to a time and the tag to the controller name. Now parsed correctly, with bare `-` treated as the RFC5424 nil value.
