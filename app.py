@@ -206,12 +206,18 @@ class ClientMetric(db.Model):
     mac = db.Column(db.String(17), index=True)           # dash-upper
     rssi = db.Column(db.Integer)                          # dBm (negative)
     snr = db.Column(db.Integer)                           # dB
-    signal_level = db.Column(db.Integer)                  # Omada 0-100 "signal"
+    signal_level = db.Column(db.Integer)                  # Omada 0-100 "signalLevel"
+    signal_rank = db.Column(db.Integer)                   # Omada signal quality rank
     channel = db.Column(db.Integer)
     band = db.Column(db.String(8))                        # "2.4G" / "5G" / "6G"
-    experience = db.Column(db.Integer)                    # Omada experience score 0-10/0-100
+    wifi_mode = db.Column(db.Integer)                     # 4/5/6 = Wi-Fi 4/5/6 (n/ac/ax)
     tx_rate = db.Column(db.Integer)                       # Mbps
     rx_rate = db.Column(db.Integer)                       # Mbps
+    uptime = db.Column(db.Integer)                        # connection session seconds
+    activity = db.Column(db.Integer)                      # current activity/throughput indicator
+    traffic_down = db.Column(db.BigInteger)               # cumulative bytes down
+    traffic_up = db.Column(db.BigInteger)                 # cumulative bytes up
+    power_save = db.Column(db.Boolean)                    # client in power-save mode
     ssid = db.Column(db.String(64))
     ap_mac = db.Column(db.String(17))                     # uplink AP
     ap_name = db.Column(db.String(64))
@@ -248,6 +254,15 @@ def _migrate_sqlite_schema() -> None:
     tables = inspector.get_table_names()
 
     migrations = {
+        "client_metric": [
+            ("signal_rank", "INTEGER"),
+            ("wifi_mode", "INTEGER"),
+            ("uptime", "INTEGER"),
+            ("activity", "INTEGER"),
+            ("traffic_down", "BIGINT"),
+            ("traffic_up", "BIGINT"),
+            ("power_save", "BOOLEAN"),
+        ],
         "syslog_event": [
             # Roam events are transitions; device_name holds the FROM-AP, these
             # hold the destination AP and both channels so the roaming view can
@@ -1013,7 +1028,7 @@ def _first(d: dict, *keys, cast=None):
 
 
 def _band_label(client: dict) -> str | None:
-    # Omada exposes band variously: radioId (0=2.4,1=5,2=6), or wifiMode/freq.
+    # Omada exposes band variously: radioId (0=2.4,1=5,2=6), or wifiBand/freq.
     raw = _first(client, "band", "wifiBand", "frequency", "freq")
     if isinstance(raw, str):
         if "6" in raw: return "6G"
@@ -1021,6 +1036,12 @@ def _band_label(client: dict) -> str | None:
         if "2" in raw: return "2.4G"
     rid = _first(client, "radioId", "radio")
     return {0: "2.4G", 1: "5G", 2: "6G"}.get(rid)
+
+
+def _wifi_gen_label(mode) -> str | None:
+    """Map Omada wifiMode int to a human Wi-Fi generation label."""
+    return {4: "Wi-Fi 4", 5: "Wi-Fi 5", 6: "Wi-Fi 6", 7: "Wi-Fi 6E",
+            8: "Wi-Fi 7"}.get(mode, (f"mode {mode}" if mode is not None else None))
 
 
 def _extract_client_metric(client: dict) -> dict | None:
@@ -1034,27 +1055,34 @@ def _extract_client_metric(client: dict) -> dict | None:
     wireless = bool(_first(client, "wireless", "isWireless")) or \
         _first(client, "rssi", "signalLevel", "signal", "signalRank") is not None
     rssi = _first(client, "rssi", "signal", cast=int)
-    # Omada often reports a 0-100 "signalLevel"/"signalRank" too.
-    sig_lvl = _first(client, "signalLevel", "signalRank", cast=int)
+    sig_lvl = _first(client, "signalLevel", cast=int)
+    sig_rank = _first(client, "signalRank", cast=int)
     snr = _first(client, "snr", cast=int)
     channel = _first(client, "channel", cast=int)
-    experience = _first(client, "experienceScore", "experience", "wifiExperience",
-                         "score", "healthScore", "wifiScore", "qoe", "clientScore",
-                         cast=int)
+    wifi_mode = _first(client, "wifiMode", "wifiStandard", cast=int)
     tx_rate = _first(client, "txRate", "txRateMbps", "tx", cast=int)
     rx_rate = _first(client, "rxRate", "rxRateMbps", "rx", cast=int)
+    uptime = _first(client, "uptime", "duration", cast=int)
+    activity = _first(client, "activity", cast=int)
+    traffic_down = _first(client, "trafficDown", "downBytes", cast=int)
+    traffic_up = _first(client, "trafficUp", "upBytes", cast=int)
+    power_save = _first(client, "powerSave")
     ssid = _first(client, "ssid", "wlanId")
     ap_mac = _first(client, "apMac", "uplinkMac", "gatewayMac", "switchMac")
     ap_mac = str(ap_mac).upper().replace(":", "-") if ap_mac else None
     ap_name = resolve_ap(ap_mac) if ap_mac else _first(client, "apName")
     # Skip clients with nothing useful (e.g. wired with no signal at all).
-    if rssi is None and snr is None and sig_lvl is None and experience is None:
+    if rssi is None and snr is None and sig_lvl is None and sig_rank is None:
         return None
     return {
         "mac": mac, "rssi": rssi, "snr": snr, "signal_level": sig_lvl,
-        "channel": channel, "band": _band_label(client), "experience": experience,
-        "tx_rate": tx_rate, "rx_rate": rx_rate, "ssid": ssid,
-        "ap_mac": ap_mac, "ap_name": ap_name, "wireless": bool(wireless),
+        "signal_rank": sig_rank, "channel": channel, "band": _band_label(client),
+        "wifi_mode": wifi_mode, "tx_rate": tx_rate, "rx_rate": rx_rate,
+        "uptime": uptime, "activity": activity, "traffic_down": traffic_down,
+        "traffic_up": traffic_up,
+        "power_save": (bool(power_save) if power_save is not None else None),
+        "ssid": ssid, "ap_mac": ap_mac, "ap_name": ap_name,
+        "wireless": bool(wireless),
     }
 
 
@@ -2472,6 +2500,38 @@ def _window_cutoff(window: str) -> tuple[str, int]:
     return cutoff, minutes
 
 
+@app.route("/api/metrics/fleet")
+def metrics_fleet():
+    """Fleet composition from the latest sample per client: Wi-Fi generation
+    distribution and band distribution. Answers 'how modern is my wireless
+    fleet' and 'how are clients split across 2.4/5/6 GHz'."""
+    sub = db.session.query(
+        ClientMetric.mac, db.func.max(ClientMetric.id).label("mx")
+    ).group_by(ClientMetric.mac).subquery()
+    rows = (db.session.query(ClientMetric)
+            .join(sub, ClientMetric.id == sub.c.mx).all())
+    gen_counts, band_counts, ps = {}, {}, 0
+    for r in rows:
+        g = _wifi_gen_label(r.wifi_mode) or "Unknown"
+        gen_counts[g] = gen_counts.get(g, 0) + 1
+        b = r.band or "Unknown"
+        band_counts[b] = band_counts.get(b, 0) + 1
+        if r.power_save:
+            ps += 1
+    gen_order = ["Wi-Fi 7", "Wi-Fi 6E", "Wi-Fi 6", "Wi-Fi 5", "Wi-Fi 4", "Unknown"]
+    band_order = ["6G", "5G", "2.4G", "Unknown"]
+    gens = sorted(({"label": k, "count": v} for k, v in gen_counts.items()),
+                  key=lambda x: gen_order.index(x["label"]) if x["label"] in gen_order else 99)
+    bands = sorted(({"label": k, "count": v} for k, v in band_counts.items()),
+                   key=lambda x: band_order.index(x["label"]) if x["label"] in band_order else 99)
+    return jsonify({
+        "total_clients": len(rows),
+        "wifi_generations": gens,
+        "bands": bands,
+        "power_save_count": ps,
+    })
+
+
 @app.route("/api/metrics/distribution")
 def metrics_distribution():
     """RSSI signal-strength distribution across all samples in the window —
@@ -2587,8 +2647,10 @@ def metrics_latest():
     out = [{
         "mac": r.mac, "name": names.get(r.mac), "ts": r.ts,
         "rssi": r.rssi, "snr": r.snr, "signal_level": r.signal_level,
-        "channel": r.channel, "band": r.band, "experience": r.experience,
-        "tx_rate": r.tx_rate, "rx_rate": r.rx_rate, "ssid": r.ssid,
+        "signal_rank": r.signal_rank, "channel": r.channel, "band": r.band,
+        "wifi_mode": r.wifi_mode, "wifi_gen": _wifi_gen_label(r.wifi_mode),
+        "tx_rate": r.tx_rate, "rx_rate": r.rx_rate, "uptime": r.uptime,
+        "power_save": r.power_save, "ssid": r.ssid,
         "ap_name": r.ap_name, "ap_mac": r.ap_mac,
     } for r in rows]
     # Worst signal first (most negative RSSI) so problems surface at the top.
@@ -2613,9 +2675,9 @@ def metrics_history():
     return jsonify({
         "mac": mac, "count": len(rows),
         "points": [{"ts": r.ts, "rssi": r.rssi, "snr": r.snr,
-                    "experience": r.experience, "channel": r.channel,
+                    "signal_rank": r.signal_rank, "channel": r.channel,
                     "ap_name": r.ap_name, "tx_rate": r.tx_rate,
-                    "rx_rate": r.rx_rate} for r in rows],
+                    "rx_rate": r.rx_rate, "uptime": r.uptime} for r in rows],
     })
 
 
@@ -3207,6 +3269,41 @@ def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
     except Exception:
         failing = []
 
+    # RF context from the latest metric sample per client — gives the AI
+    # grounded signal facts (which clients are weak, on what band/Wi-Fi gen,
+    # behind which AP) so it can reason about *why* a device struggles rather
+    # than just that it does. Only included when the metrics poller has data.
+    rf_context = {"weak_clients": [], "coverage_pct": None, "fleet": None}
+    try:
+        sub = db.session.query(
+            ClientMetric.mac, db.func.max(ClientMetric.id).label("mx")
+        ).group_by(ClientMetric.mac).subquery()
+        latest = (db.session.query(ClientMetric)
+                  .join(sub, ClientMetric.id == sub.c.mx).all())
+        if latest:
+            weak = []
+            gen_counts = {}
+            for r in latest:
+                g = _wifi_gen_label(r.wifi_mode) or "Unknown"
+                gen_counts[g] = gen_counts.get(g, 0) + 1
+                if r.rssi is not None and r.rssi < -72:
+                    weak.append({
+                        "client": _client_label(r.mac),
+                        "rssi": r.rssi, "snr": r.snr, "band": r.band,
+                        "wifi_gen": _wifi_gen_label(r.wifi_mode), "ap": r.ap_name,
+                    })
+            weak.sort(key=lambda x: x["rssi"])
+            rf_context["weak_clients"] = weak[:8]
+            rf_context["fleet"] = gen_counts
+            try:
+                _sle2 = _sle  # reuse SLE result if present above
+                cov = next((s for s in _sle.get("sles", []) if s.get("key") == "coverage"), None)
+                rf_context["coverage_pct"] = cov["success_pct"] if cov else None
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return {
         "window_hours": hours,
         "total_events": total,
@@ -3219,6 +3316,7 @@ def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
                              "short_sessions": f["short_sessions"],
                              "connects": f["connects"], "disconnects": f["disconnects"]}
                             for f in failing],
+        "rf_context": rf_context,
         "infra_events": [{"type": e.event_type, "message": (e.message or "")[:160],
                           "at": e.received_at} for e in infra],
         "severe_samples": [{"sev": e.severity, "type": e.event_type,
@@ -3282,6 +3380,14 @@ def syslog_analyze():
         "5. The data includes a 'failing_clients' list (devices with repeated "
         "short sessions — disconnects within 60s of connecting). If non-empty, "
         "highlight these as connection-stability problems and name them.\n"
+        "6. The data includes 'rf_context' with per-client signal facts: a "
+        "'weak_clients' list (RSSI below -72 dBm, with their band, Wi-Fi "
+        "generation, and AP), an overall 'coverage_pct', and a 'fleet' Wi-Fi "
+        "generation breakdown. Use this to explain WHY a device may struggle — "
+        "e.g. a weak Wi-Fi 4 IoT device far on 2.4GHz behind a distant AP is a "
+        "coverage/placement issue, not a client fault. Correlate weak signal "
+        "with any disconnects/roams for the same device. Don't alarm about a "
+        "device that's weak but stable and low-traffic (e.g. a sensor).\n"
         "\n"
         "Be specific and grounded in the data provided — don't invent events. "
         "If the data is benign, say so plainly rather than manufacturing "

@@ -770,6 +770,10 @@
                 <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">📊 Signal Distribution <span class="text-ink-300 normal-case font-normal">· how client-time splits across signal bands</span></h3>
                 <div id="metrics-distribution"><div class="text-ink-400 text-[12px]">Loading…</div></div>
             </div>
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">📡 Fleet Composition <span class="text-ink-300 normal-case font-normal">· Wi-Fi generation &amp; band mix</span></h3>
+                <div id="metrics-fleet"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+            </div>
             <!-- Per-client RSSI/SNR time-series — hidden until a client is selected -->
             <div id="metrics-trend-panel" class="bg-white border border-ink-200 rounded-lg p-5 hidden">
                 <div class="flex items-center justify-between mb-3">
@@ -2131,6 +2135,36 @@ PROPOSED:     ${esc(proposed)}</pre>
         } catch (e) {
             document.getElementById('metrics-distribution').innerHTML = `<div class="text-[12px] text-ink-400">No distribution data yet.</div>`;
         }
+        try {
+            const f = await (await fetch('/api/metrics/fleet')).json();
+            renderFleet(f);
+        } catch (e) {
+            document.getElementById('metrics-fleet').innerHTML = `<div class="text-[12px] text-ink-400">No fleet data yet.</div>`;
+        }
+    }
+
+    const WIFI_GEN_COLOR = { 'Wi-Fi 7':'#0a6b54','Wi-Fi 6E':'#0e8669','Wi-Fi 6':'#34a853','Wi-Fi 5':'#d97706','Wi-Fi 4':'#dc3545','Unknown':'#94a3b8' };
+    const BAND_COLOR = { '6G':'#0a6b54','5G':'#0e8669','2.4G':'#d97706','Unknown':'#94a3b8' };
+
+    function renderFleet(f) {
+        const wrap = document.getElementById('metrics-fleet');
+        if (!f.total_clients) {
+            wrap.innerHTML = '<div class="text-[12px] text-ink-400">No fleet data yet — enable the poller or click "Poll now".</div>';
+            return;
+        }
+        const segBar = (items, colorMap) => {
+            const tot = items.reduce((a,i)=>a+i.count,0) || 1;
+            const seg = items.map(i => `<div style="width:${(i.count/tot*100).toFixed(1)}%;background:${colorMap[i.label]||'#94a3b8'}" class="h-full" title="${esc(i.label)}: ${i.count}"></div>`).join('');
+            const legend = items.map(i => `<span class="inline-flex items-center gap-1 mr-3"><span class="inline-block w-2 h-2 rounded-sm" style="background:${colorMap[i.label]||'#94a3b8'}"></span>${esc(i.label)} <span class="text-ink-400">${i.count}</span></span>`).join('');
+            return `<div class="flex h-4 rounded overflow-hidden mb-1.5">${seg}</div><div class="text-[10px] text-ink-500 mb-3">${legend}</div>`;
+        };
+        wrap.innerHTML =
+            `<div class="text-[11px] text-ink-500 mb-1">Wi-Fi generation</div>` +
+            segBar(f.wifi_generations, WIFI_GEN_COLOR) +
+            `<div class="text-[11px] text-ink-500 mb-1">Band</div>` +
+            segBar(f.bands, BAND_COLOR) +
+            `<div class="text-[11px] text-ink-400">${f.total_clients} wireless clients` +
+            (f.power_save_count ? ` · ${f.power_save_count} in power-save` : '') + `</div>`;
     }
 
     function renderDistribution(d) {
@@ -2168,8 +2202,8 @@ PROPOSED:     ${esc(proposed)}</pre>
             <thead><tr class="text-[10px] text-ink-500 uppercase tracking-wide text-left border-b border-ink-200">
                 <th class="py-2 font-medium">Client</th><th class="py-2 font-medium">RSSI</th>
                 <th class="py-2 font-medium">SNR</th><th class="py-2 font-medium">Band/Ch</th>
-                <th class="py-2 font-medium">AP</th><th class="py-2 font-medium">Exp</th>
-                <th class="py-2 font-medium">Tx/Rx</th>
+                <th class="py-2 font-medium">Wi-Fi</th><th class="py-2 font-medium">AP</th>
+                <th class="py-2 font-medium">Uptime</th><th class="py-2 font-medium">Tx/Rx</th>
             </tr></thead><tbody>
             ${clients.map(c => {
                 const label = c.name || c.mac;
@@ -2179,13 +2213,26 @@ PROPOSED:     ${esc(proposed)}</pre>
                     <td class="py-1.5"><span style="color:${rc};font-weight:600">${c.rssi !== null ? c.rssi + ' dBm' : '—'}</span></td>
                     <td class="py-1.5 text-ink-600">${c.snr !== null ? c.snr + ' dB' : '—'}</td>
                     <td class="py-1.5 text-ink-600">${c.band || '—'}${c.channel ? ' / ' + c.channel : ''}</td>
-                    <td class="py-1.5 text-ink-600">${esc(c.ap_name || '—')}</td>
-                    <td class="py-1.5 text-ink-600">${c.experience !== null ? c.experience : '—'}</td>
-                    <td class="py-1.5 text-ink-400">${c.tx_rate || '—'}/${c.rx_rate || '—'}</td>
+                    <td class="py-1.5 text-ink-600">${esc(c.wifi_gen || '—')}</td>
+                    <td class="py-1.5 text-ink-600">${esc(c.ap_name || '—')}${c.power_save ? ' <span class="text-ink-300" title="power-save mode">💤</span>' : ''}</td>
+                    <td class="py-1.5 text-ink-400">${fmtUptime(c.uptime)}</td>
+                    <td class="py-1.5 text-ink-400">${fmtRate(c.tx_rate)}/${fmtRate(c.rx_rate)}</td>
                 </tr>`;
             }).join('')}
             </tbody></table>
-            <div class="text-[10px] text-ink-300 mt-2">Click a client to see its signal trend. Sorted by weakest signal first. RSSI: <span style="color:#0e8669">≥−65 strong</span> · <span style="color:#d97706">−66 to −75 fair</span> · <span style="color:#dc3545">≤−76 weak</span></div>`;
+            <div class="text-[10px] text-ink-300 mt-2">Click a client to see its signal trend. Sorted by weakest signal first. RSSI: <span style="color:#0e8669">≥−65 strong</span> · <span style="color:#d97706">−66 to −75 fair</span> · <span style="color:#dc3545">≤−76 weak</span> · 💤 = power-save</div>`;
+    }
+
+    function fmtUptime(s) {
+        if (!s || s < 0) return '—';
+        if (s < 3600) return Math.round(s/60) + 'm';
+        if (s < 86400) return (s/3600).toFixed(1) + 'h';
+        return Math.round(s/86400) + 'd';
+    }
+    function fmtRate(r) {
+        if (!r) return '—';
+        // Omada reports rate in Kbps; show Mbps when large
+        return r >= 1000 ? Math.round(r/1000) + 'M' : r;
     }
 
     async function pollMetricsNow() {
