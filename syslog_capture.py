@@ -87,6 +87,22 @@ _FLOW_DPT_RE = re.compile(r"\bDPT=(\d+)", re.I)
 _SSID_RE = re.compile(r'SSID[:\s]+"?([^"\,\.]+?)"?(?:\s|$|,|\.)', re.IGNORECASE)
 # Channel: "on channel 36" / "channel: 36"
 _CHANNEL_RE = re.compile(r"channel[:\s]+(\d+)", re.IGNORECASE)
+# Omada wireless client lifecycle events embed the AP as [ap:NAME:MAC], e.g.
+#   ... on [ap:clothesline:28-87-BA-F1-4A-DA] with SSID "wifi-office" ...
+# Capture the human AP name (group 1) and its MAC (group 2) separately.
+_AP_BRACKET_RE = re.compile(
+    r"\[ap:(?P<name>.*?):(?P<mac>(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2})\]")
+# Offline events carry a connection summary: "(1m connected, 1.50KB)".
+_CONN_SUMMARY_RE = re.compile(
+    r"\(([^)]*?\bconnected[^)]*)\)", re.IGNORECASE)
+# Roam transition: "roaming from [ap:garage:MAC][Channel 1] to
+# [ap:hallway:MAC][Channel 112]". Captures both AP names and both channels.
+_ROAM_RE = re.compile(
+    r"roaming\s+from\s+\[ap:(?P<from_ap>.*?):(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\]"
+    r"(?:\[Channel\s+(?P<from_ch>\d+)\])?"
+    r"\s+to\s+\[ap:(?P<to_ap>.*?):(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\]"
+    r"(?:\[Channel\s+(?P<to_ch>\d+)\])?",
+    re.IGNORECASE)
 
 # Facility/severity decode from the PRI value (PRI = facility*8 + severity).
 _SEVERITY = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
@@ -116,6 +132,47 @@ _EVENT_KEYWORDS = [
     ("system",        ["system", "controller", "backup", "login", "logout",
                        "config", "settings changed"]),
 ]
+
+# Tri-state valence: every event_type is "good", "neutral", or
+# "bad" so the UI can colour the stream and offer good/neutral/bad filtering
+# (good / neutral / bad, for colouring and filtering the event stream).
+_EVENT_VALENCE = {
+    "client_connect": "good",
+    "dhcp": "good",
+    "online": "good",
+    "device_connected": "good",
+    "client_disconnect": "neutral",
+    "roaming": "neutral",
+    "roamed": "neutral",
+    "reconnect": "neutral",
+    "offline": "neutral",
+    "notification": "neutral",
+    "system": "neutral",
+    "device_event": "neutral",
+    "traffic_flow": "neutral",
+    "other": "neutral",
+    "auth_failed": "bad",
+    "deauth": "bad",
+    "wireless_issue": "bad",
+    "device_disconnected": "bad",
+    "wan_down": "bad",
+    "rogue_dhcp": "bad",
+    "ip_conflict": "bad",
+    "arp_conflict": "bad",
+    "loop_detected": "bad",
+    "storm_detected": "bad",
+    "attack_detected": "bad",
+    "dhcp_pool_exhausted": "bad",
+    "ap_isolated": "bad",
+    "monitor_link_down": "bad",
+    "monitor_link_error": "bad",
+}
+
+
+def event_valence(event_type: str) -> str:
+    """Return 'good' | 'neutral' | 'bad' for an event type."""
+    return _EVENT_VALENCE.get(event_type or "", "neutral")
+
 
 
 def _iso_now() -> str:
@@ -165,6 +222,9 @@ def parse_syslog(raw: str, source_ip: str) -> dict:
         "ssid": None,
         "channel": None,
         "device_name": None,
+        "roam_to_ap": None,
+        "roam_from_ch": None,
+        "roam_to_ch": None,
     }
 
     # Try RFC 5424 first (has explicit version digit after PRI), then 3164.
@@ -261,10 +321,40 @@ def parse_syslog(raw: str, source_ip: str) -> dict:
         event["event_type"] = "traffic_flow"
         return event
 
-    macs = _MAC_RE.findall(body)
+    # Wireless client lifecycle events embed the AP as [ap:NAME:MAC]. Pull the
+    # AP name into device_name and strip the bracket so the generic MAC search
+    # below can't mistake the AP's MAC for the client's.
+    apm = _AP_BRACKET_RE.search(body)
+    body_for_mac = body
+    if apm:
+        ap_name = apm.group("name").strip()
+        if ap_name:
+            event["device_name"] = ap_name[:64]
+        body_for_mac = body[:apm.start()] + body[apm.end():]
+
+    # Roam events are transitions — capture BOTH endpoints. device_name holds
+    # the origin AP; roam_to_ap + channels capture where it went. This overrides
+    # the single-AP capture above (which would otherwise grab the from-AP only).
+    rm = _ROAM_RE.search(body)
+    if rm:
+        from_ap = (rm.group("from_ap") or "").strip()
+        to_ap = (rm.group("to_ap") or "").strip()
+        if from_ap:
+            event["device_name"] = from_ap[:64]
+        if to_ap:
+            event["roam_to_ap"] = to_ap[:64]
+        if rm.group("from_ch"):
+            event["roam_from_ch"] = int(rm.group("from_ch"))
+            event["channel"] = event["roam_from_ch"]
+        if rm.group("to_ch"):
+            event["roam_to_ch"] = int(rm.group("to_ch"))
+        # Strip BOTH ap brackets so neither AP MAC is taken as the client.
+        body_for_mac = _AP_BRACKET_RE.sub(" ", body)
+
+    macs = _MAC_RE.findall(body_for_mac)
     if macs:
         # findall returns the last group; re-find full matches instead.
-        full = _MAC_RE.search(body)
+        full = _MAC_RE.search(body_for_mac)
         if full:
             event["client_mac"] = full.group(0).upper().replace(":", "-")
     ipm = _IP_RE.search(body)

@@ -59,6 +59,11 @@
         .filter-pill.active { background-color: #e6f4ef; color: #0a6b54; border-color: #c0e5d8; }
         .filter-pill:not(.active):hover { background-color: #fafafa; }
 
+        /* Valence tabs */
+        .valence-tab { border-color: #e5e7eb; color: #6b7280; background: #fff; }
+        .valence-tab.active { background-color: #1c1c20; color: #fff; border-color: #1c1c20; }
+        .valence-tab:not(.active):hover { background-color: #f5f5f7; }
+
         /* ============ TABLE (Ant Design match) ============ */
         .om-table { table-layout: fixed; border-collapse: collapse; }
         .om-table th { position: relative; user-select: none; }
@@ -302,6 +307,16 @@
             <a href="#" data-target="syslog" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Syslog / Events">
                 <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
                 <span class="nav-label">Syslog / Events</span>
+            </a>
+
+            <a href="#" data-target="sle" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Service Levels">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                <span class="nav-label">Service Levels</span>
+            </a>
+
+            <a href="#" data-target="roaming" class="nav-item flex items-center gap-3 px-4 py-2 text-sm" title="Roaming">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+                <span class="nav-label">Roaming</span>
             </a>
 
             <div class="nav-section px-4 pt-5 pb-1 text-[10px] uppercase text-ink-500 font-medium tracking-wide">Configuration</div>
@@ -681,7 +696,7 @@
                 </div>
             </div>
 
-            <!-- Marvis-style graphs -->
+            <!-- Event activity graphs -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div class="bg-white border border-ink-200 rounded p-4 lg:col-span-2">
                     <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Event activity <span id="graph-window-label" class="text-ink-400 normal-case font-normal"></span></h3>
@@ -706,6 +721,12 @@
 
             <!-- Filters + event table -->
             <div class="bg-white border border-ink-200 rounded p-5">
+                <div class="flex items-center gap-1 mb-3" id="valence-tabs">
+                    <button data-valence="" class="valence-tab active text-[12px] px-3 py-1 rounded-full border transition">All</button>
+                    <button data-valence="good" class="valence-tab text-[12px] px-3 py-1 rounded-full border transition">🟢 Good</button>
+                    <button data-valence="neutral" class="valence-tab text-[12px] px-3 py-1 rounded-full border transition">⚪ Neutral</button>
+                    <button data-valence="bad" class="valence-tab text-[12px] px-3 py-1 rounded-full border transition">🔴 Bad</button>
+                </div>
                 <div class="flex flex-wrap items-center gap-2 mb-4">
                     <input id="syslog-search" type="text" placeholder="Search message text…" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-900 px-3 py-1.5 rounded transition flex-1 min-w-[200px]">
                     <select id="syslog-event-filter" class="bg-ink-50 border border-ink-200 text-sm text-ink-900 px-2 py-1.5 rounded">
@@ -723,6 +744,106 @@
                 <div id="syslog-table-wrap" class="overflow-x-auto">
                     <div class="text-center text-ink-500 text-[13px] py-12">Click Refresh to load events.</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- ===================== Service Levels (SLE) view ===================== -->
+        <div id="view-sle" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-ink-900">Service Levels</h2>
+                        <p class="text-[13px] text-ink-500 mt-0.5">Service-level metrics — success rate, trend, and root cause — computed from your event stream.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="sle-window" onchange="loadSLE()" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-800 px-3 py-1.5 rounded transition">
+                            <option value="6">Last 6 hours</option>
+                            <option value="24" selected>Last 24 hours</option>
+                            <option value="168">Last 7 days</option>
+                        </select>
+                        <button onclick="loadSLE()" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-3 py-1.5 rounded transition">Refresh</button>
+                    </div>
+                </div>
+            </div>
+            <div id="sle-blocks" class="space-y-3"><div class="text-ink-400 text-[13px] py-8 text-center">Loading…</div></div>
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">📊 Signal Distribution <span class="text-ink-300 normal-case font-normal">· how client-time splits across signal bands</span></h3>
+                <div id="metrics-distribution"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+            </div>
+            <!-- Per-client RSSI/SNR time-series — hidden until a client is selected -->
+            <div id="metrics-trend-panel" class="bg-white border border-ink-200 rounded-lg p-5 hidden">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide">📈 Signal Trend · <span id="trend-client-name" class="text-brand-700 normal-case"></span></h3>
+                    <button onclick="closeTrend()" class="text-[11px] text-ink-400 hover:text-ink-700">✕ close</button>
+                </div>
+                <div id="metrics-trend"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+            </div>
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">⚠️ Persistently Failing Clients</h3>
+                <div id="sle-failing"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+            </div>
+            <!-- Per-client RF table — collapsible, lives at the bottom as a drill-down -->
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <div class="flex items-center justify-between">
+                    <button onclick="toggleMetricsTable()" class="flex items-center gap-2 text-[12px] font-medium text-ink-500 uppercase tracking-wide hover:text-ink-800 transition">
+                        <svg id="metrics-chevron" class="w-3.5 h-3.5 transition-transform" style="transform:rotate(-90deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+                        📶 Signal &amp; Health <span class="text-ink-300 normal-case font-normal">· live RF stats per client</span>
+                    </button>
+                    <div class="flex items-center gap-2">
+                        <span id="metrics-status" class="text-[11px] text-ink-400"></span>
+                        <button onclick="pollMetricsNow()" id="metrics-poll-btn" class="text-[11px] bg-white border border-ink-200 hover:border-brand-500 hover:text-brand-700 text-ink-600 px-2 py-1 rounded transition">Poll now</button>
+                    </div>
+                </div>
+                <div id="metrics-table-wrap" class="hidden mt-3">
+                    <div id="metrics-table"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===================== Roaming view ===================== -->
+        <div id="view-roaming" class="view space-y-4">
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-ink-900">Roaming</h2>
+                        <p class="text-[13px] text-ink-500 mt-0.5">Wireless client handoffs between access points — who moves where, and how often.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select id="roaming-window" onchange="loadRoaming()" class="bg-ink-50 border border-ink-200 hover:border-ink-300 focus:border-brand-500 focus:bg-white focus:outline-none text-sm text-ink-800 px-3 py-1.5 rounded transition">
+                            <option value="6">Last 6 hours</option>
+                            <option value="24" selected>Last 24 hours</option>
+                            <option value="168">Last 7 days</option>
+                            <option value="720">Last 30 days</option>
+                        </select>
+                        <button onclick="loadRoaming()" class="bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-3 py-1.5 rounded transition">Refresh</button>
+                    </div>
+                </div>
+                <div id="roaming-summary" class="text-[12px] text-ink-400 mt-2"></div>
+            </div>
+
+            <!-- Handoff flow diagram -->
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Handoff map · which APs hand off to which</h3>
+                <div id="roaming-flow" class="overflow-x-auto"><div class="text-center text-ink-400 text-[13px] py-8">Loading…</div></div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <!-- AP-pair table -->
+                <div class="bg-white border border-ink-200 rounded-lg p-5">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Busiest handoff paths</h3>
+                    <div id="roaming-pairs"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+                </div>
+                <!-- Per-device roam counts -->
+                <div class="bg-white border border-ink-200 rounded-lg p-5">
+                    <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Roamiest devices</h3>
+                    <div id="roaming-devices"><div class="text-ink-400 text-[12px]">Loading…</div></div>
+                </div>
+            </div>
+
+            <!-- Per-device timeline -->
+            <div class="bg-white border border-ink-200 rounded-lg p-5">
+                <h3 class="text-[12px] font-medium text-ink-500 uppercase tracking-wide mb-3">Roam timeline · click a device above to focus</h3>
+                <div id="roaming-timeline"><div class="text-ink-400 text-[12px]">Select a device, or showing all recent roams.</div></div>
             </div>
         </div>
 
@@ -1962,8 +2083,491 @@ PROPOSED:     ${esc(proposed)}</pre>
         finally { btn.innerHTML = o; btn.disabled = false; await loadData(); }
     }
 
+    // ============== SERVICE LEVELS (SLE) VIEW ==============
+    async function loadSLE() {
+        const hours = document.getElementById('sle-window').value;
+        document.getElementById('sle-blocks').innerHTML = '<div class="text-ink-400 text-[13px] py-8 text-center">Loading…</div>';
+        try {
+            const r = await fetch('/api/sle?hours=' + encodeURIComponent(hours));
+            const d = await r.json();
+            renderSLEBlocks(d.sles);
+            renderFailingClients(d.failing_clients);
+        } catch (e) {
+            document.getElementById('sle-blocks').innerHTML = `<div class="text-danger-500 text-[13px] py-8 text-center">Couldn't load SLE data: ${esc(e.message || e)}</div>`;
+        }
+        loadMetrics();
+    }
+
+    function rssiColor(rssi) {
+        if (rssi === null || rssi === undefined) return '#94a3b8';
+        if (rssi >= -65) return '#0e8669';   // strong (green)
+        if (rssi >= -75) return '#d97706';   // fair (amber)
+        return '#dc3545';                     // weak (red)
+    }
+
+    async function loadMetrics() {
+        try {
+            const st = await (await fetch('/api/metrics/status')).json();
+            const statusEl = document.getElementById('metrics-status');
+            if (!st.enabled && st.stored_rows === 0) {
+                statusEl.textContent = 'poller off — click Poll now, or set METRICS_POLL_ENABLED=1';
+            } else {
+                const last = st.last_poll && st.last_poll.at ? formatDateShort(st.last_poll.at) : 'never';
+                statusEl.textContent = `${st.stored_rows.toLocaleString()} samples · every ${st.interval_s}s · last ${last}`;
+            }
+            const d = await (await fetch('/api/metrics/latest')).json();
+            renderMetricsTable(d.clients);
+            loadDistribution();
+        } catch (e) {
+            document.getElementById('metrics-table').innerHTML = `<div class="text-danger-500 text-[12px]">Couldn't load metrics: ${esc(e.message || e)}</div>`;
+        }
+    }
+
+    async function loadDistribution() {
+        const hours = document.getElementById('sle-window').value;
+        try {
+            const d = await (await fetch('/api/metrics/distribution?hours=' + encodeURIComponent(hours))).json();
+            renderDistribution(d);
+        } catch (e) {
+            document.getElementById('metrics-distribution').innerHTML = `<div class="text-[12px] text-ink-400">No distribution data yet.</div>`;
+        }
+    }
+
+    function renderDistribution(d) {
+        const wrap = document.getElementById('metrics-distribution');
+        if (!d.total_samples) {
+            wrap.innerHTML = '<div class="text-[12px] text-ink-400">No RSSI samples yet — enable the poller or click "Poll now" above.</div>';
+            return;
+        }
+        const max = Math.max(1, ...d.bands.map(b => b.count));
+        const bars = d.bands.map(b => {
+            const w = (b.count / max * 100);
+            return `<div class="flex items-center gap-2 py-1 text-[11px]">
+                <span class="w-32 shrink-0 text-ink-600">${esc(b.label)}</span>
+                <div class="flex-1 bg-ink-50 rounded h-4 overflow-hidden">
+                    <div class="h-full rounded" style="width:${w.toFixed(0)}%;background:${b.color}"></div>
+                </div>
+                <span class="w-20 text-right text-ink-500">${b.count} · ${b.pct}%</span>
+            </div>`;
+        }).join('');
+        const weakNote = d.weak_aps && d.weak_aps.length
+            ? `<div class="text-[11px] text-ink-500 mt-3">Weak samples (&lt;−72 dBm) concentrated on: ${d.weak_aps.slice(0,3).map(w => `<span class="text-danger-600">${esc(w.ap)}</span> (${w.count})`).join(', ')}</div>`
+            : '';
+        wrap.innerHTML = bars +
+            `<div class="text-[11px] text-ink-400 mt-2">${d.total_samples.toLocaleString()} samples · median ${d.median_rssi} dBm</div>` +
+            weakNote;
+    }
+
+    function renderMetricsTable(clients) {
+        const wrap = document.getElementById('metrics-table');
+        if (!clients || !clients.length) {
+            wrap.innerHTML = '<div class="text-[12px] text-ink-400">No samples yet. Click "Poll now" to take a snapshot, or enable the poller for continuous collection.</div>';
+            return;
+        }
+        wrap.innerHTML = `<table class="w-full text-[12px]">
+            <thead><tr class="text-[10px] text-ink-500 uppercase tracking-wide text-left border-b border-ink-200">
+                <th class="py-2 font-medium">Client</th><th class="py-2 font-medium">RSSI</th>
+                <th class="py-2 font-medium">SNR</th><th class="py-2 font-medium">Band/Ch</th>
+                <th class="py-2 font-medium">AP</th><th class="py-2 font-medium">Exp</th>
+                <th class="py-2 font-medium">Tx/Rx</th>
+            </tr></thead><tbody>
+            ${clients.map(c => {
+                const label = c.name || c.mac;
+                const rc = rssiColor(c.rssi);
+                return `<tr class="border-b border-ink-50 hover:bg-ink-50/50">
+                    <td class="py-1.5"><button class="text-left ${c.name ? 'text-brand-700 hover:underline' : 'text-ink-500 font-mono hover:underline'}" onclick="openTrend('${esc(c.mac)}','${esc(label)}')" title="View RSSI/SNR trend over time">${esc(label)}</button></td>
+                    <td class="py-1.5"><span style="color:${rc};font-weight:600">${c.rssi !== null ? c.rssi + ' dBm' : '—'}</span></td>
+                    <td class="py-1.5 text-ink-600">${c.snr !== null ? c.snr + ' dB' : '—'}</td>
+                    <td class="py-1.5 text-ink-600">${c.band || '—'}${c.channel ? ' / ' + c.channel : ''}</td>
+                    <td class="py-1.5 text-ink-600">${esc(c.ap_name || '—')}</td>
+                    <td class="py-1.5 text-ink-600">${c.experience !== null ? c.experience : '—'}</td>
+                    <td class="py-1.5 text-ink-400">${c.tx_rate || '—'}/${c.rx_rate || '—'}</td>
+                </tr>`;
+            }).join('')}
+            </tbody></table>
+            <div class="text-[10px] text-ink-300 mt-2">Click a client to see its signal trend. Sorted by weakest signal first. RSSI: <span style="color:#0e8669">≥−65 strong</span> · <span style="color:#d97706">−66 to −75 fair</span> · <span style="color:#dc3545">≤−76 weak</span></div>`;
+    }
+
+    async function pollMetricsNow() {
+        const btn = document.getElementById('metrics-poll-btn');
+        const orig = btn.textContent; btn.textContent = 'Polling…'; btn.disabled = true;
+        try {
+            const r = await (await fetch('/api/metrics/poll', { method: 'POST' })).json();
+            if (!r.ok) showError('Poll failed: ' + (r.error || 'unknown'));
+        } catch (e) { showError('Poll failed: ' + e.message); }
+        finally { btn.textContent = orig; btn.disabled = false; loadMetrics(); }
+    }
+
+    let _metricsTableOpen = false;
+    function toggleMetricsTable() {
+        _metricsTableOpen = !_metricsTableOpen;
+        document.getElementById('metrics-table-wrap').classList.toggle('hidden', !_metricsTableOpen);
+        const chev = document.getElementById('metrics-chevron');
+        chev.style.transform = _metricsTableOpen ? 'rotate(0deg)' : 'rotate(-90deg)';
+    }
+
+    function closeTrend() {
+        document.getElementById('metrics-trend-panel').classList.add('hidden');
+    }
+
+    async function openTrend(mac, label) {
+        const panel = document.getElementById('metrics-trend-panel');
+        panel.classList.remove('hidden');
+        document.getElementById('trend-client-name').textContent = label;
+        document.getElementById('metrics-trend').innerHTML = '<div class="text-ink-400 text-[12px] py-4">Loading…</div>';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const hours = document.getElementById('sle-window').value;
+        try {
+            const d = await (await fetch('/api/metrics/history?mac=' + encodeURIComponent(mac) + '&hours=' + encodeURIComponent(hours))).json();
+            renderTrend(d);
+        } catch (e) {
+            document.getElementById('metrics-trend').innerHTML = `<div class="text-danger-500 text-[12px]">Couldn't load trend: ${esc(e.message || e)}</div>`;
+        }
+    }
+
+    // Dual-axis time-series: RSSI (dBm, left) + SNR (dB, right) over time, with
+    // AP-association shading underneath so you can see signal vs. which AP.
+    function renderTrend(d) {
+        const wrap = document.getElementById('metrics-trend');
+        const pts = (d.points || []).filter(p => p.rssi !== null && p.rssi !== undefined);
+        if (pts.length < 2) {
+            wrap.innerHTML = `<div class="text-[12px] text-ink-400">Only ${pts.length} sample${pts.length===1?'':'s'} so far for this client. The trend fills in as the poller runs — check back after it's collected for a while.</div>`;
+            return;
+        }
+        const W = 900, H = 260, padL = 50, padR = 50, padT = 20, padB = 40;
+        const plotW = W - padL - padR, plotH = H - padT - padB;
+        const t0 = new Date(pts[0].ts).getTime(), t1 = new Date(pts[pts.length-1].ts).getTime();
+        const span = Math.max(t1 - t0, 60000);
+        const xAt = ts => padL + ((new Date(ts).getTime() - t0) / span) * plotW;
+        // RSSI axis: typically -90..-30
+        const rssiMin = -90, rssiMax = -30;
+        const yRssi = v => padT + (1 - (v - rssiMin) / (rssiMax - rssiMin)) * plotH;
+        // SNR axis: 0..70
+        const snrMin = 0, snrMax = 70;
+        const ySnr = v => padT + (1 - (v - snrMin) / (snrMax - snrMin)) * plotH;
+
+        let svg = `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:280px">`;
+        // AP-association shaded bands underneath (each contiguous AP run)
+        let runStart = 0;
+        for (let i = 1; i <= pts.length; i++) {
+            if (i === pts.length || pts[i].ap_name !== pts[runStart].ap_name) {
+                const x0 = xAt(pts[runStart].ts), x1 = xAt(pts[i-1].ts);
+                const ap = pts[runStart].ap_name;
+                if (ap && x1 > x0) {
+                    // light alternating tint + AP label
+                    svg += `<rect x="${x0}" y="${padT}" width="${Math.max(2,x1-x0)}" height="${plotH}" fill="${runStart % 2 ? '#f1f5f9' : '#f8fafc'}" opacity="0.7"/>`;
+                    if (x1 - x0 > 40) svg += `<text x="${(x0+x1)/2}" y="${padT+plotH-4}" text-anchor="middle" font-size="9" fill="#94a3b8">${esc(ap)}</text>`;
+                }
+                runStart = i;
+            }
+        }
+        // Gridlines + RSSI axis labels (left)
+        [-40,-55,-70,-85].forEach(v => {
+            const y = yRssi(v);
+            svg += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="#eee" stroke-width="1"/>`;
+            svg += `<text x="${padL-6}" y="${y+3}" text-anchor="end" font-size="9" fill="#0e8669">${v}</text>`;
+        });
+        // SNR axis labels (right)
+        [10,30,50,70].forEach(v => {
+            svg += `<text x="${W-padR+6}" y="${ySnr(v)+3}" text-anchor="start" font-size="9" fill="#2563eb">${v}</text>`;
+        });
+        // RSSI line (green) with coloured dots
+        let rp = '';
+        pts.forEach((p,i) => { rp += (i?' L':'M') + xAt(p.ts) + ',' + yRssi(p.rssi); });
+        svg += `<path d="${rp}" fill="none" stroke="#0e8669" stroke-width="1.5"/>`;
+        pts.forEach(p => {
+            svg += `<circle cx="${xAt(p.ts)}" cy="${yRssi(p.rssi)}" r="2.5" fill="${rssiColor(p.rssi)}"><title>${esc(formatDateShort(p.ts))} · ${p.rssi} dBm${p.ap_name?' · '+esc(p.ap_name):''}</title></circle>`;
+        });
+        // SNR line (blue, dashed) where present
+        const snrPts = pts.filter(p => p.snr !== null && p.snr !== undefined);
+        if (snrPts.length >= 2) {
+            let sp = '';
+            snrPts.forEach((p,i) => { sp += (i?' L':'M') + xAt(p.ts) + ',' + ySnr(p.snr); });
+            svg += `<path d="${sp}" fill="none" stroke="#2563eb" stroke-width="1.2" stroke-dasharray="3,2" opacity="0.8"/>`;
+        }
+        // Time axis
+        [0,0.5,1].forEach(f => {
+            const x = padL + f*plotW, tt = new Date(t0 + f*span);
+            svg += `<text x="${x}" y="${H-8}" text-anchor="middle" font-size="9" fill="#94a3b8">${tt.getHours().toString().padStart(2,'0')}:${tt.getMinutes().toString().padStart(2,'0')}</text>`;
+        });
+        svg += `</svg>`;
+        const legend = `<div class="flex items-center gap-4 text-[10px] text-ink-400 mb-2">
+            <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#0e8669"></span> RSSI (dBm, left)</span>
+            <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#2563eb"></span> SNR (dB, right)</span>
+            <span class="text-ink-300">shaded bands = which AP · ${pts.length} samples</span>
+        </div>`;
+        wrap.innerHTML = legend + svg;
+    }
+
+    function sleColor(pct) {
+        if (pct === null || pct === undefined) return '#94a3b8';
+        if (pct >= 95) return '#0e8669';   // green
+        if (pct >= 80) return '#d97706';   // amber
+        return '#dc3545';                  // red
+    }
+
+    function renderSLEBlocks(sles) {
+        const wrap = document.getElementById('sle-blocks');
+        wrap.innerHTML = sles.map(s => {
+            const pct = s.success_pct;
+            const color = sleColor(pct);
+            const pctTxt = (pct === null) ? 'No data' : pct + '%';
+            const total = s.ok + s.bad;
+            // Mini timeline: stacked ok/bad bars across buckets
+            const maxBar = Math.max(1, ...s.timeline.map(b => b.ok + b.bad));
+            const bars = s.timeline.map(b => {
+                const h = ((b.ok + b.bad) / maxBar) * 40;
+                const badFrac = (b.ok + b.bad) ? b.bad / (b.ok + b.bad) : 0;
+                const badH = h * badFrac, okH = h - badH;
+                return `<div class="flex flex-col justify-end" style="height:40px;width:100%" title="${b.ok} ok · ${b.bad} bad">
+                    ${b.bad ? `<div style="height:${badH}px;background:#dc3545"></div>` : ''}
+                    ${b.ok ? `<div style="height:${okH}px;background:#0e8669;opacity:.55"></div>` : ''}
+                </div>`;
+            }).join('');
+            const causes = s.causes.filter(c => c.count > 0);
+            const causeTotal = causes.reduce((a, c) => a + c.count, 0) || 1;
+            const causeHTML = causes.length
+                ? causes.map(c => `<div class="flex items-center justify-between text-[11px] py-0.5">
+                        <span class="text-ink-600">${esc(c.name)}</span>
+                        <span class="text-ink-400">${Math.round(c.count / causeTotal * 100)}% · ${c.count}</span>
+                    </div>`).join('')
+                : '<div class="text-[11px] text-ink-400">No issues in this window 🎉</div>';
+            return `<div class="bg-white border border-ink-200 rounded-lg p-5">
+                <div class="grid grid-cols-1 md:grid-cols-[180px_1fr_220px] gap-5 items-center">
+                    <div>
+                        <div class="text-[12px] text-ink-500 uppercase tracking-wide">${esc(s.label)}</div>
+                        <div class="text-3xl font-semibold mt-1" style="color:${color}">${pctTxt}</div>
+                        <div class="text-[11px] text-ink-400 mt-0.5">${total.toLocaleString()} events</div>
+                    </div>
+                    <div>
+                        <div class="flex items-end gap-px" style="height:40px">${bars}</div>
+                        <div class="text-[10px] text-ink-300 mt-1">success trend over window</div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] text-ink-400 uppercase tracking-wide mb-1">Root cause</div>
+                        ${causeHTML}
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function renderFailingClients(failing) {
+        const wrap = document.getElementById('sle-failing');
+        if (!failing || !failing.length) {
+            wrap.innerHTML = '<div class="text-[12px] text-ink-400">No persistently failing clients detected — every device that connected stayed connected. 🎉</div>';
+            return;
+        }
+        wrap.innerHTML = `<div class="space-y-1">${failing.map(f => {
+            const label = f.name || f.mac;
+            return `<div class="flex items-center gap-3 py-1.5 border-b border-ink-50 text-[12px]">
+                <button class="flex-1 text-left truncate ${f.name ? 'text-brand-700 font-medium hover:underline' : 'text-ink-500 font-mono'}" onclick="jumpToDevice('${esc(f.mac)}')">${esc(label)}</button>
+                <span class="text-ink-500">${f.short_sessions} short sessions</span>
+                <span class="text-ink-400">${f.connects} connects / ${f.disconnects} disconnects</span>
+                <span class="text-danger-500 font-medium">score ${f.score}</span>
+            </div>`;
+        }).join('')}</div>
+        <div class="text-[11px] text-ink-400 mt-2">A "short session" is a disconnect within 60s of connecting — a sign the device can't hold a stable connection.</div>`;
+    }
+
+    // ============== ROAMING VIEW ==============
+    let _roamingData = null;
+    let _roamFocusMac = null;
+
+    async function loadRoaming() {
+        const hours = document.getElementById('roaming-window').value;
+        const setLoading = id => document.getElementById(id).innerHTML = '<div class="text-ink-400 text-[12px] py-4">Loading…</div>';
+        ['roaming-flow', 'roaming-pairs', 'roaming-devices'].forEach(setLoading);
+        try {
+            const r = await fetch('/api/roaming?hours=' + encodeURIComponent(hours));
+            const d = await r.json();
+            _roamingData = d;
+            _roamFocusMac = null;
+            const rq = d.roam_quality || {good:0, worse:0, unknown:0};
+            const scored = rq.good + rq.worse;
+            let qualityTxt = '';
+            if (scored > 0) {
+                const goodPct = Math.round(rq.good / scored * 100);
+                qualityTxt = ` · roam quality: ${goodPct}% to a stronger/equal AP` +
+                    (rq.worse ? `, ${rq.worse} to a weaker AP (>6 dB drop)` : '');
+            } else if (rq.unknown > 0) {
+                qualityTxt = ` · roam quality pending (need RSSI samples around roam times — let the poller run)`;
+            }
+            document.getElementById('roaming-summary').textContent =
+                `${d.total_roams} roam events across ${d.aps.length} access points · ${d.devices.length} devices roamed` + qualityTxt;
+            renderRoamFlow(d);
+            renderRoamPairs(d);
+            renderRoamDevices(d);
+            renderRoamTimeline(d, null);
+        } catch (e) {
+            document.getElementById('roaming-flow').innerHTML = `<div class="text-danger-500 text-[12px] py-4">Couldn't load roaming data: ${esc(e.message || e)}</div>`;
+        }
+    }
+
+    // SVG handoff map: APs as nodes around a circle, handoffs as weighted arcs.
+    function renderRoamFlow(d) {
+        const wrap = document.getElementById('roaming-flow');
+        if (!d.pairs.length) {
+            wrap.innerHTML = '<div class="text-center text-ink-400 text-[13px] py-8">No roam events in this window. As devices move between APs, handoffs will appear here.</div>';
+            return;
+        }
+        const aps = d.aps;
+        const N = aps.length;
+        const W = 680, H = 420, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
+        const pos = {};
+        aps.forEach((ap, i) => {
+            const ang = (i / N) * 2 * Math.PI - Math.PI / 2;
+            pos[ap] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
+        });
+        const maxCount = Math.max(...d.pairs.map(p => p.count));
+        let svg = `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:440px"><defs><marker id="rarrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0e8669"/></marker></defs>`;
+        // Arcs
+        for (const p of d.pairs) {
+            const a = pos[p.from], b = pos[p.to];
+            if (!a || !b) continue;
+            const w = 1 + (p.count / maxCount) * 5;
+            // Curve the line so bidirectional pairs don't overlap
+            const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const ctrlX = mx - dy * 0.18, ctrlY = my + dx * 0.18;
+            // Shorten endpoint so the arrow sits at the node edge
+            const ang = Math.atan2(b.y - ctrlY, b.x - ctrlX);
+            const ex = b.x - 26 * Math.cos(ang), ey = b.y - 26 * Math.sin(ang);
+            svg += `<path d="M${a.x},${a.y} Q${ctrlX},${ctrlY} ${ex},${ey}" fill="none" stroke="#0e8669" stroke-width="${w.toFixed(1)}" opacity="0.45" marker-end="url(#rarrow)"><title>${esc(p.from)} → ${esc(p.to)}: ${p.count}</title></path>`;
+        }
+        // Nodes
+        for (const ap of aps) {
+            const p = pos[ap];
+            svg += `<circle cx="${p.x}" cy="${p.y}" r="22" fill="#e6f4ef" stroke="#0e8669" stroke-width="2"/>`;
+            svg += `<text x="${p.x}" y="${p.y + 4}" text-anchor="middle" font-size="11" font-weight="600" fill="#0a6b54">${esc(ap.length > 8 ? ap.slice(0, 7) + '…' : ap)}</text>`;
+            svg += `<title>${esc(ap)}</title>`;
+        }
+        svg += `</svg>`;
+        wrap.innerHTML = svg;
+    }
+
+    function renderRoamPairs(d) {
+        const wrap = document.getElementById('roaming-pairs');
+        if (!d.pairs.length) { wrap.innerHTML = '<div class="text-ink-400 text-[12px]">No handoffs recorded.</div>'; return; }
+        const max = Math.max(...d.pairs.map(p => p.count));
+        wrap.innerHTML = d.pairs.slice(0, 12).map(p => `
+            <div class="flex items-center gap-2 py-1 text-[12px]">
+                <div class="flex-1 flex items-center gap-1.5 min-w-0">
+                    <span class="text-brand-700 font-medium truncate">${esc(p.from)}</span>
+                    <span class="text-ink-400">→</span>
+                    <span class="text-info-600 font-medium truncate">${esc(p.to)}</span>
+                </div>
+                <div class="w-24 bg-ink-100 rounded-full h-1.5 overflow-hidden"><div class="bg-brand-500 h-full" style="width:${(p.count / max * 100).toFixed(0)}%"></div></div>
+                <span class="text-ink-600 font-mono w-6 text-right">${p.count}</span>
+            </div>`).join('');
+    }
+
+    function renderRoamDevices(d) {
+        const wrap = document.getElementById('roaming-devices');
+        if (!d.devices.length) { wrap.innerHTML = '<div class="text-ink-400 text-[12px]">No devices roamed.</div>'; return; }
+        const max = Math.max(...d.devices.map(x => x.count));
+        wrap.innerHTML = d.devices.slice(0, 12).map(dev => {
+            const label = dev.name || dev.mac;
+            return `<div class="flex items-center gap-2 py-1 text-[12px] cursor-pointer hover:bg-ink-50 rounded px-1 -mx-1 roam-device-row" data-mac="${esc(dev.mac)}" title="Click to see this device's roam timeline">
+                <span class="flex-1 truncate ${dev.name ? 'text-brand-700 font-medium' : 'text-ink-500 font-mono'}">${esc(label)}</span>
+                <div class="w-24 bg-ink-100 rounded-full h-1.5 overflow-hidden"><div class="bg-info-500 h-full" style="width:${(dev.count / max * 100).toFixed(0)}%"></div></div>
+                <span class="text-ink-600 font-mono w-6 text-right">${dev.count}</span>
+            </div>`;
+        }).join('');
+        wrap.querySelectorAll('.roam-device-row').forEach(row =>
+            row.addEventListener('click', () => { _roamFocusMac = row.dataset.mac; renderRoamTimeline(_roamingData, _roamFocusMac); }));
+    }
+
+    function renderRoamTimeline(d, focusMac) {
+        const wrap = document.getElementById('roaming-timeline');
+        // Pick the timeline(s) to draw. Focus = one device; else the most active.
+        let tls = d.timelines || [];
+        if (focusMac) tls = tls.filter(t => t.mac === focusMac);
+        if (!tls.length) {
+            wrap.innerHTML = '<div class="text-ink-400 text-[12px]">No association timeline available for this window.</div>';
+            return;
+        }
+        // If no focus, draw the single most-active device and let the user pick others.
+        const tl = tls[0];
+        const pts = (tl.points || []).filter(p => p.ap).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+        if (pts.length < 1) {
+            wrap.innerHTML = '<div class="text-ink-400 text-[12px]">Not enough association data to chart.</div>';
+            return;
+        }
+        // Build the AP axis (Y) and time axis (X): AP rows, time across.
+        const aps = [...new Set(pts.map(p => p.ap))];
+        const t0 = new Date(pts[0].at).getTime();
+        const t1 = new Date(pts[pts.length - 1].at).getTime();
+        const span = Math.max(t1 - t0, 60000); // avoid div0; min 1 min
+        const W = 900, rowH = 34, padL = 150, padR = 30, padT = 20, padB = 30;
+        const H = padT + aps.length * rowH + padB;
+        const plotW = W - padL - padR;
+        const apY = ap => padT + aps.indexOf(ap) * rowH + rowH / 2;
+        const xAt = at => padL + ((new Date(at).getTime() - t0) / span) * plotW;
+
+        const KIND_COLOR = { connect: '#0e8669', roam: '#2563eb', disconnect: '#dc3545' };
+        // Does this timeline carry RSSI? If so we colour dots by signal (the
+        // signal-quality view); otherwise fall back to event-type colours.
+        const hasRssi = pts.some(p => p.rssi !== null && p.rssi !== undefined);
+        let svg = `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:${H}px">`;
+        // AP row guide lines + labels
+        aps.forEach(ap => {
+            const y = apY(ap);
+            svg += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eee" stroke-width="1"/>`;
+            const label = ap.length > 18 ? ap.slice(0, 17) + '…' : ap;
+            svg += `<text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#475569">${esc(label)}</text>`;
+        });
+        // Step-line connecting consecutive association points
+        let pathD = '';
+        pts.forEach((p, i) => {
+            const x = xAt(p.at), y = apY(p.ap);
+            if (i === 0) { pathD += `M${x},${y}`; }
+            else {
+                const prevY = apY(pts[i - 1].ap);
+                pathD += ` L${x},${prevY} L${x},${y}`; // step: horizontal then vertical
+            }
+        });
+        svg += `<path d="${pathD}" fill="none" stroke="#334155" stroke-width="1.5" opacity="0.5"/>`;
+        // Event dots — coloured by RSSI (signal) when available, else by kind.
+        pts.forEach(p => {
+            const x = xAt(p.at), y = apY(p.ap);
+            const c = (hasRssi && p.rssi !== null && p.rssi !== undefined)
+                ? rssiColor(p.rssi) : (KIND_COLOR[p.kind] || '#64748b');
+            const chTxt = p.ch ? ` · ch ${p.ch}` : '';
+            const rssiTxt = (p.rssi !== null && p.rssi !== undefined) ? ` · ${p.rssi} dBm` : '';
+            svg += `<circle cx="${x}" cy="${y}" r="5" fill="${c}" stroke="#fff" stroke-width="1"><title>${esc(formatDateShort(p.at))} · ${esc(p.kind)} · ${esc(p.ap)}${chTxt}${rssiTxt}</title></circle>`;
+        });
+        // Time axis ticks (start / mid / end)
+        [0, 0.5, 1].forEach(f => {
+            const x = padL + f * plotW;
+            const tt = new Date(t0 + f * span);
+            svg += `<text x="${x}" y="${H - 8}" text-anchor="middle" font-size="10" fill="#94a3b8">${tt.getHours().toString().padStart(2,'0')}:${tt.getMinutes().toString().padStart(2,'0')}</text>`;
+        });
+        svg += `</svg>`;
+
+        const devLabel = tl.name || tl.mac;
+        const legend = hasRssi
+            ? `<div class="flex items-center gap-3 text-[10px] text-ink-400 mb-2">
+                 <span class="text-ink-500">dot colour = signal at that AP:</span>
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#0e8669"></span> ≥−65 strong</span>
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#d97706"></span> −66 to −75 fair</span>
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#dc3545"></span> ≤−76 weak</span>
+               </div>`
+            : `<div class="flex items-center gap-3 text-[10px] text-ink-400 mb-2">
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#0e8669"></span> connect</span>
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#2563eb"></span> roam</span>
+                 <span><span class="inline-block w-2 h-2 rounded-full" style="background:#dc3545"></span> disconnect</span>
+                 <span class="text-ink-300">· enable metrics polling to colour by signal</span>
+               </div>`;
+        const header = `<div class="flex items-center justify-between mb-2">
+            <div class="text-[12px] text-ink-600">Association timeline for <span class="font-medium text-brand-700">${esc(devLabel)}</span></div>
+            ${focusMac ? `<button class="text-[11px] text-info-500 hover:underline" onclick="_roamFocusMac=null;renderRoamTimeline(_roamingData,null)">show most active</button>` : '<span class="text-[11px] text-ink-400">click a device above to switch</span>'}
+        </div>` + legend;
+        wrap.innerHTML = header + svg;
+    }
+
     // ============== VIEW SWITCHING ==============
-    const VIEW_TITLES = { clients: 'Clients', policy: 'Naming Policy', 'ai-model': 'AI Models', dhcp: 'DHCP Capture', fingerbank: 'Fingerbank', settings: 'Settings', syslog: 'Syslog / Events' };
+    const VIEW_TITLES = { clients: 'Clients', policy: 'Naming Policy', 'ai-model': 'AI Models', dhcp: 'DHCP Capture', fingerbank: 'Fingerbank', settings: 'Settings', syslog: 'Syslog / Events', roaming: 'Roaming', sle: 'Service Levels' };
     function showView(name) {
         currentView = name;
         document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
@@ -1975,6 +2579,8 @@ PROPOSED:     ${esc(proposed)}</pre>
         if (name === 'clients') renderTable();
         if (name === 'settings') loadSettings();
         if (name === 'syslog') loadSyslog();
+        if (name === 'roaming') loadRoaming();
+        if (name === 'sle') loadSLE();
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
     document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', (e) => { e.preventDefault(); showView(item.dataset.target); }));
@@ -2407,7 +3013,7 @@ PROPOSED:     ${esc(proposed)}</pre>
     }
 
     function renderChatEmpty() {
-        // Marvis-style example queries — clicking one fills the input and sends.
+        // Example queries — clicking one fills the input and sends.
         const examples = chatScope === 'all' ? [
             "Chart the top talkers this hour",
             "Show event types as a breakdown",
@@ -2619,6 +3225,18 @@ PROPOSED:     ${esc(proposed)}</pre>
     }
 
     let syslogMacFilter = null;
+    let syslogValence = '';
+
+    // Wire valence filter tabs (good/neutral/bad) — set state, reload, restyle.
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.valence-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                syslogValence = tab.dataset.valence || '';
+                document.querySelectorAll('.valence-tab').forEach(t => t.classList.toggle('active', t === tab));
+                loadSyslog();
+            });
+        });
+    });
 
     function jumpToSyslogForDevice(mac) {
         syslogMacFilter = mac;
@@ -2783,6 +3401,7 @@ PROPOSED:     ${esc(proposed)}</pre>
         if (et) params.set('event_type', et);
         if (sev) params.set('severity', sev);
         if (syslogMacFilter) params.set('mac', syslogMacFilter);
+        if (syslogValence) params.set('valence', syslogValence);
         params.set('limit', '300');
         try {
             const r = await fetch('/api/syslog/events?' + params.toString());
@@ -3000,8 +3619,9 @@ PROPOSED:     ${esc(proposed)}</pre>
                         : `<span class="font-mono text-ink-500">${esc(e.client_mac)}${apBadge}</span>`;
                 }
             }
-            return `<tr class="syslog-row border-b border-ink-100 hover:bg-ink-50/50 cursor-pointer" data-idx="${idx}" title="Click to see full payload">
-                <td class="px-2 py-1.5 text-[11px] text-ink-500 whitespace-nowrap font-mono">${esc(formatDateShort(e.received_at))}</td>
+            const valColor = e.valence === 'good' ? '#0e8669' : e.valence === 'bad' ? '#dc3545' : 'transparent';
+            return `<tr class="syslog-row border-b border-ink-100 hover:bg-ink-50/50 cursor-pointer" data-idx="${idx}" data-valence="${esc(e.valence || 'neutral')}" title="Click to see full payload">
+                <td class="px-2 py-1.5 text-[11px] text-ink-500 whitespace-nowrap font-mono" style="border-left:3px solid ${valColor}">${esc(formatDateShort(e.received_at))}</td>
                 <td class="px-2 py-1.5 text-[12px] whitespace-nowrap">${evLabel}</td>
                 <td class="px-2 py-1.5 text-[11px] ${tone} uppercase whitespace-nowrap">${esc(e.severity || '—')}</td>
                 <td class="px-2 py-1.5 text-[12px]">${macCell}</td>

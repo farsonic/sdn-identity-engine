@@ -90,6 +90,15 @@ SYSLOG_DROP_TRAFFIC_FLOW = os.environ.get("SYSLOG_DROP_TRAFFIC_FLOW", "0") == "1
 # /api/webhook/<token>. If empty, the endpoint is open (LAN-trusted).
 WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 
+# Client metrics poller. Periodically snapshots per-client RF/health stats
+# (RSSI/SNR/signal/channel/experience/rates) from the Omada client API into the
+# ClientMetric time-series table — the data syslog never carries. Disabled by
+# default; enable via env or the Settings UI. Interval in seconds (min 30),
+# retention in hours (rows older than this are pruned).
+METRICS_POLL_ENABLED = os.environ.get("METRICS_POLL_ENABLED", "0") == "1"
+METRICS_POLL_INTERVAL = max(30, int(os.environ.get("METRICS_POLL_INTERVAL", "60")))
+METRICS_RETENTION_HOURS = int(os.environ.get("METRICS_RETENTION_HOURS", "168"))  # 7d
+
 if not OMADA_VERIFY_TLS:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -180,7 +189,33 @@ class SyslogEvent(db.Model):
     ssid = db.Column(db.String(64))
     channel = db.Column(db.Integer)
     device_name = db.Column(db.String(64))
+    # Roam transitions: device_name = FROM-AP; these capture the destination.
+    roam_to_ap = db.Column(db.String(64))
+    roam_from_ch = db.Column(db.Integer)
+    roam_to_ch = db.Column(db.Integer)
     raw = db.Column(db.Text)
+
+
+class ClientMetric(db.Model):
+    """Time-series snapshot of per-client RF/health stats, sampled from the
+    Omada client API on a timer. Append-only; pruned on its own retention.
+    This is the data syslog never carries (RSSI/SNR/signal quality) and is what
+    unlocks coverage/throughput/roam-quality analysis."""
+    id = db.Column(db.Integer, primary_key=True)
+    ts = db.Column(db.String(32), index=True)            # ISO UTC sample time
+    mac = db.Column(db.String(17), index=True)           # dash-upper
+    rssi = db.Column(db.Integer)                          # dBm (negative)
+    snr = db.Column(db.Integer)                           # dB
+    signal_level = db.Column(db.Integer)                  # Omada 0-100 "signal"
+    channel = db.Column(db.Integer)
+    band = db.Column(db.String(8))                        # "2.4G" / "5G" / "6G"
+    experience = db.Column(db.Integer)                    # Omada experience score 0-10/0-100
+    tx_rate = db.Column(db.Integer)                       # Mbps
+    rx_rate = db.Column(db.Integer)                       # Mbps
+    ssid = db.Column(db.String(64))
+    ap_mac = db.Column(db.String(17))                     # uplink AP
+    ap_name = db.Column(db.String(64))
+    wireless = db.Column(db.Boolean, default=True)
 
 
 class DeviceSetting(db.Model):
@@ -213,6 +248,14 @@ def _migrate_sqlite_schema() -> None:
     tables = inspector.get_table_names()
 
     migrations = {
+        "syslog_event": [
+            # Roam events are transitions; device_name holds the FROM-AP, these
+            # hold the destination AP and both channels so the roaming view can
+            # render from->to handoffs without re-parsing raw on every query.
+            ("roam_to_ap", "VARCHAR(64)"),
+            ("roam_from_ch", "INTEGER"),
+            ("roam_to_ch", "INTEGER"),
+        ],
         "device_setting": [
             ("ai_analysis", "TEXT"),
             ("ai_analyzed_at", "VARCHAR(32)"),
@@ -248,9 +291,37 @@ def _migrate_sqlite_schema() -> None:
         conn.commit()
 
 
+def _backfill_roam_destinations() -> None:
+    """Roam events stored before the destination-capture fix have device_name
+    (the FROM-AP) but a NULL roam_to_ap. Re-parse their stored raw payload to
+    recover the destination AP + channels. Idempotent — only touches roam rows
+    that are missing roam_to_ap but still have raw text."""
+    rows = (SyslogEvent.query
+            .filter(SyslogEvent.event_type.in_(["roaming", "roamed"]),
+                    SyslogEvent.roam_to_ap.is_(None),
+                    SyslogEvent.raw.isnot(None))
+            .all())
+    if not rows:
+        return
+    from syslog_capture import parse_syslog as _parse
+    fixed = 0
+    for r in rows:
+        parsed = _parse(r.raw, r.source_ip or "")
+        if parsed.get("roam_to_ap"):
+            r.device_name = parsed.get("device_name") or r.device_name
+            r.roam_to_ap = parsed.get("roam_to_ap")
+            r.roam_from_ch = parsed.get("roam_from_ch")
+            r.roam_to_ch = parsed.get("roam_to_ch")
+            fixed += 1
+    if fixed:
+        db.session.commit()
+        log.info("Backfilled roam destination on %d historical event(s)", fixed)
+
+
 with app.app_context():
     db.create_all()
     _migrate_sqlite_schema()
+    _backfill_roam_destinations()
 
 
 def reload_app_config() -> None:
@@ -572,6 +643,9 @@ def _store_syslog_event(event: dict) -> None:
             ssid=event.get("ssid"),
             channel=event.get("channel"),
             device_name=event.get("device_name"),
+            roam_to_ap=event.get("roam_to_ap"),
+            roam_from_ch=event.get("roam_from_ch"),
+            roam_to_ch=event.get("roam_to_ch"),
             raw=event.get("raw"),
         )
         db.session.add(row)
@@ -614,6 +688,7 @@ def _prune_syslog() -> None:
 
 
 from syslog_capture import SyslogCapture  # noqa: E402
+import syslog_capture as syslog_capture_mod  # noqa: E402
 
 syslog_capture = SyslogCapture(SYSLOG_PORT, _store_syslog_event)
 if SYSLOG_ENABLED:
@@ -621,6 +696,13 @@ if SYSLOG_ENABLED:
     log.info("Syslog ingestion enabled (UDP/%d)", SYSLOG_PORT)
 else:
     log.info("Syslog ingestion disabled via SYSLOG_ENABLED=0")
+
+# Client metrics poller (opt-in). Snapshots per-client RF/health stats over
+# time into ClientMetric. Started here so it shares the app/DB context.
+if METRICS_POLL_ENABLED:
+    threading.Thread(target=_metrics_poller_loop, daemon=True, name="metrics-poller").start()
+else:
+    log.info("Client metrics poller disabled (METRICS_POLL_ENABLED=0)")
 
 
 def get_setting(mac: str) -> DeviceSetting | None:
@@ -909,6 +991,130 @@ def resolve_ap(mac: str) -> str | None:
     if not mac:
         return None
     return get_ap_names().get(mac.upper().replace(":", "-"))
+
+
+# ---------------------------------------------------------------------------
+# Client metrics poller — snapshots per-client RF/health stats over time.
+# ---------------------------------------------------------------------------
+
+def _first(d: dict, *keys, cast=None):
+    """Return the first present, non-None value among keys; optionally cast.
+    Tolerates Omada's field-name variations across controller versions."""
+    for k in keys:
+        if k in d and d[k] is not None:
+            v = d[k]
+            if cast:
+                try:
+                    return cast(v)
+                except (ValueError, TypeError):
+                    continue
+            return v
+    return None
+
+
+def _band_label(client: dict) -> str | None:
+    # Omada exposes band variously: radioId (0=2.4,1=5,2=6), or wifiMode/freq.
+    raw = _first(client, "band", "wifiBand", "frequency", "freq")
+    if isinstance(raw, str):
+        if "6" in raw: return "6G"
+        if "5" in raw: return "5G"
+        if "2" in raw: return "2.4G"
+    rid = _first(client, "radioId", "radio")
+    return {0: "2.4G", 1: "5G", 2: "6G"}.get(rid)
+
+
+def _extract_client_metric(client: dict) -> dict | None:
+    """Pull the RF/health fields from one Omada client dict into our schema.
+    Schema-tolerant: tries the field names different controller versions use.
+    Returns None for wired/uninteresting clients with no signal data."""
+    mac = _first(client, "mac", "macAddress")
+    if not mac:
+        return None
+    mac = str(mac).upper().replace(":", "-")
+    wireless = bool(_first(client, "wireless", "isWireless")) or \
+        _first(client, "rssi", "signalLevel", "signal", "signalRank") is not None
+    rssi = _first(client, "rssi", "signal", cast=int)
+    # Omada often reports a 0-100 "signalLevel"/"signalRank" too.
+    sig_lvl = _first(client, "signalLevel", "signalRank", cast=int)
+    snr = _first(client, "snr", cast=int)
+    channel = _first(client, "channel", cast=int)
+    experience = _first(client, "experienceScore", "experience", "wifiExperience",
+                         "score", "healthScore", "wifiScore", "qoe", "clientScore",
+                         cast=int)
+    tx_rate = _first(client, "txRate", "txRateMbps", "tx", cast=int)
+    rx_rate = _first(client, "rxRate", "rxRateMbps", "rx", cast=int)
+    ssid = _first(client, "ssid", "wlanId")
+    ap_mac = _first(client, "apMac", "uplinkMac", "gatewayMac", "switchMac")
+    ap_mac = str(ap_mac).upper().replace(":", "-") if ap_mac else None
+    ap_name = resolve_ap(ap_mac) if ap_mac else _first(client, "apName")
+    # Skip clients with nothing useful (e.g. wired with no signal at all).
+    if rssi is None and snr is None and sig_lvl is None and experience is None:
+        return None
+    return {
+        "mac": mac, "rssi": rssi, "snr": snr, "signal_level": sig_lvl,
+        "channel": channel, "band": _band_label(client), "experience": experience,
+        "tx_rate": tx_rate, "rx_rate": rx_rate, "ssid": ssid,
+        "ap_mac": ap_mac, "ap_name": ap_name, "wireless": bool(wireless),
+    }
+
+
+_metrics_last_poll = {"at": None, "stored": 0, "error": None, "running": False}
+
+
+def poll_client_metrics_once() -> dict:
+    """Fetch the client list and store one metric snapshot per wireless client.
+    Returns a small status dict. Safe to call from a timer or on demand."""
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        clients = omada.list_clients()
+    except Exception as exc:
+        _metrics_last_poll.update(at=ts, error=str(exc))
+        log.warning("metrics poll: list_clients failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    stored = 0
+    with app.app_context():
+        for c in clients:
+            m = _extract_client_metric(c)
+            if not m:
+                continue
+            db.session.add(ClientMetric(ts=ts, **m))
+            stored += 1
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            log.exception("metrics poll: commit failed")
+            return {"ok": False, "error": "commit failed"}
+    _metrics_last_poll.update(at=ts, stored=stored, error=None)
+    return {"ok": True, "stored": stored, "at": ts}
+
+
+def _prune_client_metrics() -> None:
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=METRICS_RETENTION_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with app.app_context():
+        n = ClientMetric.query.filter(ClientMetric.ts < cutoff).delete(synchronize_session=False)
+        if n:
+            db.session.commit()
+            log.info("Pruned %d client-metric rows older than %dh", n, METRICS_RETENTION_HOURS)
+
+
+def _metrics_poller_loop():
+    import time as _time
+    _metrics_last_poll["running"] = True
+    log.info("Client metrics poller started (every %ds, retain %dh)",
+             METRICS_POLL_INTERVAL, METRICS_RETENTION_HOURS)
+    prune_counter = 0
+    while True:
+        try:
+            poll_client_metrics_once()
+            prune_counter += 1
+            if prune_counter % 30 == 0:  # prune roughly every 30 polls
+                _prune_client_metrics()
+        except Exception:
+            log.exception("metrics poller loop error")
+        _time.sleep(METRICS_POLL_INTERVAL)
 
 
 
@@ -2159,6 +2365,18 @@ def syslog_events():
     sev = request.args.get("severity")
     if sev:
         q = q.filter(SyslogEvent.severity == sev)
+    valence = request.args.get("valence")
+    if valence in ("good", "neutral", "bad"):
+        # Valence is derived from event_type; filter by the matching set.
+        types = [t for t, v in syslog_capture_mod._EVENT_VALENCE.items() if v == valence]
+        if valence == "neutral":
+            # neutral also covers any event_type not explicitly mapped
+            mapped = set(syslog_capture_mod._EVENT_VALENCE)
+            q = q.filter(db.or_(SyslogEvent.event_type.in_(types),
+                                SyslogEvent.event_type.notin_(mapped),
+                                SyslogEvent.event_type.is_(None)))
+        else:
+            q = q.filter(SyslogEvent.event_type.in_(types))
     since = request.args.get("since")
     if since:
         q = q.filter(SyslogEvent.received_at >= since)
@@ -2206,6 +2424,7 @@ def syslog_events():
             "severity": r.severity,
             "facility": r.facility,
             "event_type": r.event_type,
+            "valence": syslog_capture_mod.event_valence(r.event_type),
             "category": r.category,
             "client_mac": r.client_mac,
             "client_ip": r.client_ip,
@@ -2253,9 +2472,525 @@ def _window_cutoff(window: str) -> tuple[str, int]:
     return cutoff, minutes
 
 
+@app.route("/api/metrics/distribution")
+def metrics_distribution():
+    """RSSI signal-strength distribution across all samples in the window —
+    a histogram of how many client-samples fall in each signal band. The
+    natural visual for coverage (a distribution, not a success-over-time line).
+    Also returns per-band client counts and a per-AP weak-sample breakdown."""
+    from datetime import datetime, timezone, timedelta
+    hours = min(int(request.args.get("hours", 24)), 720)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = (ClientMetric.query
+            .filter(ClientMetric.ts >= cutoff, ClientMetric.rssi.isnot(None))
+            .limit(200000).all())
+    # 5 dBm bands from -30 (best) down to -90 (worst).
+    edges = [-30, -45, -55, -65, -72, -80, -90]
+    labels = ["≥−45 excellent", "−45 to −55 great", "−55 to −65 good",
+              "−65 to −72 fair", "−72 to −80 weak", "≤−80 very weak"]
+    band_colors = ["#0a6b54", "#0e8669", "#34a853", "#d97706", "#e8590c", "#dc3545"]
+    counts = [0] * len(labels)
+    per_ap_weak = {}
+    rssis = []
+    for cm in rows:
+        v = cm.rssi
+        rssis.append(v)
+        # find band: edges descend; band i covers (edges[i+1], edges[i]]
+        placed = False
+        for i in range(len(labels)):
+            hi, lo = edges[i], edges[i + 1]
+            if v <= hi and v > lo:
+                counts[i] += 1; placed = True; break
+        if not placed:
+            if v > edges[0]: counts[0] += 1
+            else: counts[-1] += 1
+        if v < -72:
+            ap = cm.ap_name or cm.ap_mac or "unknown"
+            per_ap_weak[ap] = per_ap_weak.get(ap, 0) + 1
+    total = len(rssis)
+    bands = [{"label": labels[i], "count": counts[i], "color": band_colors[i],
+              "pct": round(100.0 * counts[i] / total, 1) if total else 0}
+             for i in range(len(labels))]
+    weak_aps = sorted(({"ap": ap, "count": n} for ap, n in per_ap_weak.items()),
+                      key=lambda x: -x["count"])
+    return jsonify({
+        "total_samples": total,
+        "bands": bands,
+        "weak_aps": weak_aps,
+        "median_rssi": (sorted(rssis)[total // 2] if total else None),
+    })
+
+
+@app.route("/api/metrics/raw_sample")
+def metrics_raw_sample():
+    """Diagnostic: return the raw field names (and a sample wireless client's
+    raw dict) straight from the Omada API. Use this to discover the exact key
+    names your controller uses when a column isn't populating — no curl needed."""
+    try:
+        clients = omada.list_clients()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    # Prefer a wireless client (has signal) so the RF fields are present.
+    sample = None
+    for c in clients:
+        if _first(c, "rssi", "signal", "signalLevel", "signalRank") is not None:
+            sample = c
+            break
+    sample = sample or (clients[0] if clients else {})
+    return jsonify({
+        "client_count": len(clients),
+        "all_keys": sorted(sample.keys()),
+        "sample": sample,
+        "mapped": _extract_client_metric(sample),
+    })
+
+
+@app.route("/api/metrics/status")
+def metrics_status():
+    """Poller status + a quick count of stored metric rows."""
+    total = db.session.query(ClientMetric.id).count()
+    return jsonify({
+        "enabled": METRICS_POLL_ENABLED,
+        "interval_s": METRICS_POLL_INTERVAL,
+        "retention_h": METRICS_RETENTION_HOURS,
+        "stored_rows": total,
+        "last_poll": _metrics_last_poll,
+    })
+
+
+@app.route("/api/metrics/poll", methods=["POST"])
+def metrics_poll_now():
+    """Trigger one poll on demand (useful for testing without waiting)."""
+    return jsonify(poll_client_metrics_once())
+
+
+@app.route("/api/metrics/latest")
+def metrics_latest():
+    """Most-recent metric sample per client, joined to identity. Powers a
+    live RF/health overview table."""
+    # Latest row per mac
+    sub = db.session.query(
+        ClientMetric.mac, db.func.max(ClientMetric.id).label("mx")
+    ).group_by(ClientMetric.mac).subquery()
+    rows = (db.session.query(ClientMetric)
+            .join(sub, ClientMetric.id == sub.c.mx)
+            .all())
+    macs = [r.mac for r in rows]
+    names = {}
+    if macs:
+        for s in DeviceSetting.query.filter(DeviceSetting.mac.in_(macs)).all():
+            nm = s.last_synced_name
+            if s.ai_analysis:
+                try: nm = nm or json.loads(s.ai_analysis).get("short_name")
+                except (json.JSONDecodeError, TypeError): pass
+            names[s.mac] = nm
+    out = [{
+        "mac": r.mac, "name": names.get(r.mac), "ts": r.ts,
+        "rssi": r.rssi, "snr": r.snr, "signal_level": r.signal_level,
+        "channel": r.channel, "band": r.band, "experience": r.experience,
+        "tx_rate": r.tx_rate, "rx_rate": r.rx_rate, "ssid": r.ssid,
+        "ap_name": r.ap_name, "ap_mac": r.ap_mac,
+    } for r in rows]
+    # Worst signal first (most negative RSSI) so problems surface at the top.
+    out.sort(key=lambda x: (x["rssi"] if x["rssi"] is not None else 999))
+    return jsonify({"count": len(out), "clients": out})
+
+
+@app.route("/api/metrics/history")
+def metrics_history():
+    """Time-series for one client (RSSI/SNR/experience over the window).
+    For the per-device signal chart."""
+    from datetime import datetime, timezone, timedelta
+    mac = (request.args.get("mac") or "").upper().replace(":", "-")
+    if not mac:
+        return jsonify({"error": "mac required"}), 400
+    hours = min(int(request.args.get("hours", 24)), 720)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = (ClientMetric.query
+            .filter(ClientMetric.mac == mac, ClientMetric.ts >= cutoff)
+            .order_by(ClientMetric.ts.asc())
+            .limit(5000).all())
+    return jsonify({
+        "mac": mac, "count": len(rows),
+        "points": [{"ts": r.ts, "rssi": r.rssi, "snr": r.snr,
+                    "experience": r.experience, "channel": r.channel,
+                    "ap_name": r.ap_name, "tx_rate": r.tx_rate,
+                    "rx_rate": r.rx_rate} for r in rows],
+    })
+
+
+@app.route("/api/sle")
+def sle_dashboard():
+    """Service-level (SLE) dashboard. Computes the service-level metrics we have
+    real data for — Successful Connects, DHCP Success, Roaming Health — each as
+    a success %, a bucketed timeline, and a simple root-cause breakdown. Also
+    returns Persistently Failing Clients (devices with an
+    unhealthy connect/disconnect pattern). No RSSI required — all behavioral."""
+    from datetime import datetime, timezone, timedelta
+    hours = min(int(request.args.get("hours", 24)), 720)
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    rows = (SyslogEvent.query
+            .filter(SyslogEvent.received_at >= cutoff)
+            .order_by(SyslogEvent.id.asc())
+            .limit(20000).all())
+
+    # Bucket helper for timelines (aim ~30 buckets across the window).
+    n_buckets = 30
+    span_s = max(hours * 3600, 1)
+    bucket_s = span_s / n_buckets
+    t0 = (now - timedelta(hours=hours)).timestamp()
+    def bucket_of(iso_ts):
+        try:
+            ts = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            return None
+        b = int((ts - t0) / bucket_s)
+        return max(0, min(n_buckets - 1, b))
+
+    def blank_timeline():
+        return [{"ok": 0, "bad": 0} for _ in range(n_buckets)]
+
+    # --- Successful Connects: connects are "good"; auth_failed/deauth are the
+    #     failures. (We can't see the full association state machine, so
+    #     this is connect-success vs auth/deauth-failure.) ---
+    connect_tl = blank_timeline()
+    connect_ok = connect_bad = 0
+    connect_causes = {"auth": 0, "deauth": 0}
+    # --- DHCP success vs failure ---
+    dhcp_tl = blank_timeline()
+    dhcp_ok = dhcp_bad = 0
+    # --- Roaming health: a roam is "bad" if it's a rapid return (ping-pong) ---
+    roam_tl = blank_timeline()
+    roam_ok = roam_bad = 0
+    roam_causes = {"ping_pong": 0, "rapid_rereoam": 0}
+
+    # Track per-client recent roams to detect ping-pong (A->B then B->A quickly)
+    last_roam = {}  # mac -> (to_ap, ts)
+    # Track connect/disconnect pairs for failing-client detection
+    per_client = {}  # mac -> {"connects":n,"disconnects":n,"short":n,"last_connect_ts":..}
+
+    for r in rows:
+        et = r.event_type
+        b = bucket_of(r.received_at)
+        try:
+            ts = datetime.strptime(r.received_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            ts = None
+
+        if et == "client_connect":
+            connect_ok += 1
+            if b is not None: connect_tl[b]["ok"] += 1
+            pc = per_client.setdefault(r.client_mac, {"connects": 0, "disconnects": 0, "short": 0, "last_connect_ts": None, "name": None})
+            pc["connects"] += 1
+            pc["last_connect_ts"] = ts
+        elif et in ("auth_failed", "deauth"):
+            connect_bad += 1
+            connect_causes["auth" if et == "auth_failed" else "deauth"] += 1
+            if b is not None: connect_tl[b]["bad"] += 1
+        elif et == "client_disconnect":
+            pc = per_client.setdefault(r.client_mac, {"connects": 0, "disconnects": 0, "short": 0, "last_connect_ts": None, "name": None})
+            pc["disconnects"] += 1
+            # "short session" = disconnect within 60s of a connect
+            if ts and pc.get("last_connect_ts") and (ts - pc["last_connect_ts"]) < 60:
+                pc["short"] += 1
+
+        if et == "dhcp":
+            # DHCP failures would be auth_failed-style; Omada mostly emits the
+            # success ("allocated"/"renewed"). Treat timeouts/denied as bad.
+            msg = (r.message or "").lower()
+            if any(w in msg for w in ("timed out", "timeout", "denied", "nack", "failed", "exhausted")):
+                dhcp_bad += 1
+                if b is not None: dhcp_tl[b]["bad"] += 1
+            else:
+                dhcp_ok += 1
+                if b is not None: dhcp_tl[b]["ok"] += 1
+
+        if et in ("roaming", "roamed"):
+            frm, to = r.device_name, r.roam_to_ap
+            bad = False
+            prev = last_roam.get(r.client_mac)
+            if prev and ts:
+                prev_frm, prev_to, prev_ts = prev
+                # ping-pong: this roam reverses the previous one (A->B then
+                # B->A) within 90s — i.e. we're now going back to where we were.
+                if to and prev_frm and to == prev_frm and (ts - prev_ts) < 90:
+                    bad = True; roam_causes["ping_pong"] += 1
+                elif (ts - prev_ts) < 30:  # re-roamed again very quickly
+                    bad = True; roam_causes["rapid_rereoam"] += 1
+            if bad:
+                roam_bad += 1
+                if b is not None: roam_tl[b]["bad"] += 1
+            else:
+                roam_ok += 1
+                if b is not None: roam_tl[b]["ok"] += 1
+            if ts:
+                last_roam[r.client_mac] = (frm, to, ts)
+
+    # Resolve identity for failing clients
+    def pct(ok, bad):
+        tot = ok + bad
+        return round(100.0 * ok / tot, 1) if tot else None
+
+    # Persistently failing clients: many short sessions, or disconnects
+    # outnumbering connects with a meaningful sample.
+    failing = []
+    macs = [m for m in per_client if m]
+    names = {}
+    if macs:
+        for s in DeviceSetting.query.filter(DeviceSetting.mac.in_(macs)).all():
+            nm = s.last_synced_name
+            if s.ai_analysis:
+                try: nm = nm or json.loads(s.ai_analysis).get("short_name")
+                except (json.JSONDecodeError, TypeError): pass
+            names[s.mac] = nm
+    for mac, pc in per_client.items():
+        if not mac:
+            continue
+        score = pc["short"] * 2 + max(0, pc["disconnects"] - pc["connects"])
+        if pc["short"] >= 3 or (pc["connects"] >= 5 and pc["short"] >= pc["connects"] * 0.4):
+            failing.append({
+                "mac": mac, "name": names.get(mac),
+                "connects": pc["connects"], "disconnects": pc["disconnects"],
+                "short_sessions": pc["short"], "score": score,
+            })
+    failing.sort(key=lambda x: -x["score"])
+
+    # --- Coverage SLE: % of client-samples (≈ client-minutes) at or above an
+    #     RSSI threshold. This is the canonical RSSI-based coverage metric and
+    #     is only possible now that the poller stores per-client RSSI. The
+    #     "weak signal" classifier counts samples below threshold; we also break
+    #     down which APs the weak samples were on (where coverage is thin). ---
+    cov_threshold = int(request.args.get("rssi_threshold", -72))
+    cov_tl = blank_timeline()
+    cov_ok = cov_bad = 0
+    cov_by_ap = {}
+    cov_rows = (ClientMetric.query
+                .filter(ClientMetric.ts >= cutoff,
+                        ClientMetric.rssi.isnot(None))
+                .limit(200000).all())
+    for cm in cov_rows:
+        b = bucket_of(cm.ts)
+        if cm.rssi >= cov_threshold:
+            cov_ok += 1
+            if b is not None: cov_tl[b]["ok"] += 1
+        else:
+            cov_bad += 1
+            if b is not None: cov_tl[b]["bad"] += 1
+            ap = cm.ap_name or cm.ap_mac or "unknown"
+            cov_by_ap[ap] = cov_by_ap.get(ap, 0) + 1
+    cov_causes = sorted(
+        ({"name": f"Weak on {ap}", "count": n} for ap, n in cov_by_ap.items()),
+        key=lambda x: -x["count"])[:4]
+    has_coverage_data = (cov_ok + cov_bad) > 0
+
+    sle_blocks = [
+        {"key": "connects", "label": "Successful Connects",
+         "success_pct": pct(connect_ok, connect_bad),
+         "ok": connect_ok, "bad": connect_bad,
+         "timeline": connect_tl,
+         "causes": [{"name": "Auth failure", "count": connect_causes["auth"]},
+                    {"name": "Deauth", "count": connect_causes["deauth"]}]},
+        {"key": "dhcp", "label": "DHCP Success",
+         "success_pct": pct(dhcp_ok, dhcp_bad),
+         "ok": dhcp_ok, "bad": dhcp_bad,
+         "timeline": dhcp_tl,
+         "causes": [{"name": "Timeout / denied / exhausted", "count": dhcp_bad}]},
+        {"key": "roaming", "label": "Roaming Health",
+         "success_pct": pct(roam_ok, roam_bad),
+         "ok": roam_ok, "bad": roam_bad,
+         "timeline": roam_tl,
+         "causes": [{"name": "Ping-pong roam", "count": roam_causes["ping_pong"]},
+                    {"name": "Rapid re-roam", "count": roam_causes["rapid_rereoam"]}]},
+    ]
+    if has_coverage_data:
+        sle_blocks.append(
+            {"key": "coverage", "label": f"Coverage (≥{cov_threshold} dBm)",
+             "success_pct": pct(cov_ok, cov_bad),
+             "ok": cov_ok, "bad": cov_bad,
+             "timeline": cov_tl,
+             "causes": cov_causes or [{"name": "Weak signal", "count": cov_bad}]})
+
+    return jsonify({
+        "window_hours": hours,
+        "sles": sle_blocks,
+        "coverage_threshold": cov_threshold,
+        "has_coverage_data": has_coverage_data,
+        "failing_clients": failing[:15],
+    })
+
+
+@app.route("/api/roaming")
+def roaming_data():
+    """Aggregate wireless roam events for the Roaming view: AP-pair handoff
+    counts (the flow graph + table) and a per-device roam timeline. Roam events
+    store the origin AP in device_name and the destination in roam_to_ap."""
+    from datetime import datetime, timezone, timedelta
+    hours = min(int(request.args.get("hours", 24)), 720)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    rows = (SyslogEvent.query
+            .filter(SyslogEvent.event_type.in_(["roaming", "roamed"]),
+                    SyslogEvent.received_at >= cutoff)
+            .order_by(SyslogEvent.id.desc())
+            .limit(2000).all())
+
+    # Resolve client identity once for all MACs present.
+    macs = {r.client_mac for r in rows if r.client_mac}
+    names = {}
+    if macs:
+        for s in DeviceSetting.query.filter(DeviceSetting.mac.in_(macs)).all():
+            nm = s.last_synced_name
+            if s.ai_analysis:
+                try:
+                    nm = nm or json.loads(s.ai_analysis).get("short_name")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            names[s.mac] = nm
+
+    # AP-pair handoff counts (from -> to).
+    pair_counts = {}
+    ap_set = set()
+    per_device = {}
+    for r in rows:
+        frm, to = r.device_name, r.roam_to_ap
+        if frm:
+            ap_set.add(frm)
+        if to:
+            ap_set.add(to)
+        if frm and to:
+            key = f"{frm}\u2192{to}"
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+        # Per-device timeline entry
+        mac = r.client_mac or "unknown"
+        per_device.setdefault(mac, {
+            "mac": mac, "name": names.get(mac), "hops": [], "count": 0,
+        })
+        per_device[mac]["hops"].append({
+            "at": r.received_at, "from": frm, "to": to,
+            "from_ch": r.roam_from_ch, "to_ch": r.roam_to_ch,
+        })
+        per_device[mac]["count"] += 1
+
+    pairs = sorted(
+        ({"from": k.split("\u2192")[0], "to": k.split("\u2192")[1], "count": v}
+         for k, v in pair_counts.items()),
+        key=lambda x: -x["count"])
+    devices = sorted(per_device.values(), key=lambda d: -d["count"])
+
+    # --- RSSI enrichment for roam-quality scoring + signal-coloured timeline.
+    #     Pre-load this window's metric samples for the roaming clients, indexed
+    #     by mac -> sorted [(epoch, rssi, ap_name)]. Then for each roam we find
+    #     the RSSI just before and just after to judge whether the client moved
+    #     to a STRONGER AP (good) or a weaker one (suboptimal). ---
+    import bisect
+    def _epoch(iso_ts):
+        try:
+            return datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            return None
+    samples_by_mac = {}
+    if macs:
+        mrows = (ClientMetric.query
+                 .filter(ClientMetric.mac.in_(macs),
+                         ClientMetric.ts >= cutoff,
+                         ClientMetric.rssi.isnot(None))
+                 .order_by(ClientMetric.ts.asc()).limit(200000).all())
+        for cm in mrows:
+            e = _epoch(cm.ts)
+            if e is not None:
+                samples_by_mac.setdefault(cm.mac, []).append((e, cm.rssi, cm.ap_name))
+    def _rssi_near(mac, at_epoch, side):
+        """Nearest RSSI sample before/after a roam (within 5 min), or None."""
+        arr = samples_by_mac.get(mac)
+        if not arr or at_epoch is None:
+            return None
+        times = [x[0] for x in arr]
+        idx = bisect.bisect_left(times, at_epoch)
+        if side == "before":
+            j = idx - 1
+            if j >= 0 and at_epoch - arr[j][0] <= 300:
+                return arr[j][1]
+        else:  # after
+            j = idx
+            if j < len(arr) and arr[j][0] - at_epoch <= 300:
+                return arr[j][1]
+        return None
+
+    # Score each roam hop and accumulate per-device + global quality stats.
+    roam_quality = {"good": 0, "worse": 0, "unknown": 0}
+    for dev in per_device.values():
+        for hop in dev["hops"]:
+            e = _epoch(hop["at"])
+            before = _rssi_near(dev["mac"], e, "before")
+            after = _rssi_near(dev["mac"], e, "after")
+            hop["rssi_before"] = before
+            hop["rssi_after"] = after
+            if before is not None and after is not None:
+                delta = after - before
+                hop["rssi_delta"] = delta
+                # A roam that improves RSSI (or holds it) is good; a meaningful
+                # drop (>6 dB worse, the standard "should not have roamed" bar)
+                # is a suboptimal roam.
+                if delta < -6:
+                    hop["quality"] = "worse"; roam_quality["worse"] += 1
+                else:
+                    hop["quality"] = "good"; roam_quality["good"] += 1
+            else:
+                hop["quality"] = "unknown"; roam_quality["unknown"] += 1
+
+    # Build a per-device association timeline ("which AP over time").
+    # Uses connect + roam events to derive the AP a client was on at each point.
+    # A connect/online sets the AP; a roam moves it from->to. We emit ordered
+    # association points per device so the frontend can draw a step-line.
+    focus = request.args.get("device")  # optional MAC to limit the timeline
+    tl_q = (SyslogEvent.query
+            .filter(SyslogEvent.event_type.in_(
+                ["roaming", "roamed", "client_connect", "client_disconnect"]),
+                SyslogEvent.received_at >= cutoff))
+    if focus:
+        tl_q = tl_q.filter(SyslogEvent.client_mac == focus.upper().replace(":", "-"))
+    tl_rows = tl_q.order_by(SyslogEvent.id.asc()).limit(3000).all()
+
+    timeline = {}
+    for r in tl_rows:
+        mac = r.client_mac
+        if not mac:
+            continue
+        t = timeline.setdefault(mac, {"mac": mac, "name": names.get(mac), "points": []})
+        if r.event_type in ("roaming", "roamed"):
+            # destination AP is where it ends up
+            ap = r.roam_to_ap or r.device_name
+            kind = "roam"
+        elif r.event_type == "client_connect":
+            ap = r.device_name
+            kind = "connect"
+        else:  # disconnect
+            ap = r.device_name
+            kind = "disconnect"
+        t["points"].append({"at": r.received_at, "ap": ap, "kind": kind,
+                            "ch": r.roam_to_ch or r.channel,
+                            "rssi": _rssi_near(mac, _epoch(r.received_at), "after")})
+    # Keep only devices with at least one located point, ordered by activity
+    timelines = sorted(
+        (t for t in timeline.values() if any(p["ap"] for p in t["points"])),
+        key=lambda t: -len(t["points"]))
+
+    return jsonify({
+        "window_hours": hours,
+        "total_roams": len(rows),
+        "aps": sorted(ap_set),
+        "pairs": pairs,
+        "devices": devices,
+        "timelines": timelines,
+        "roam_quality": roam_quality,
+    })
+
+
 @app.route("/api/syslog/graphs")
 def syslog_graphs():
-    """Aggregated data for the Marvis-style charts, constrained to a time
+    """Aggregated data for the roaming/event charts, constrained to a time
     window (default 1h). Returns:
       - timeline:    event counts bucketed over time (for an activity graph)
       - by_type:     event-type distribution
@@ -2463,6 +3198,15 @@ def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
                 deduped.append(b)
         return " / ".join(deduped)
 
+    # Persistently failing clients — reuse the SLE detector so the
+    # briefing, dashboard, and chatbot all agree on who's failing.
+    try:
+        with app.test_request_context(f"/api/sle?hours={int(hours)}"):
+            _sle = sle_dashboard().get_json()
+        failing = _sle.get("failing_clients", [])[:8]
+    except Exception:
+        failing = []
+
     return {
         "window_hours": hours,
         "total_events": total,
@@ -2471,6 +3215,10 @@ def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
         "noisy_clients": [{"client": _client_label(m), "events": n} for m, n in noisy],
         "auth_failures": [{"client": _client_label(m), "fails": n} for m, n in auth_fails],
         "flapping_clients": [{"client": _client_label(m), "transitions": n} for m, n in flap],
+        "failing_clients": [{"client": _client_label(f["mac"]),
+                             "short_sessions": f["short_sessions"],
+                             "connects": f["connects"], "disconnects": f["disconnects"]}
+                            for f in failing],
         "infra_events": [{"type": e.event_type, "message": (e.message or "")[:160],
                           "at": e.received_at} for e in infra],
         "severe_samples": [{"sev": e.severity, "type": e.event_type,
@@ -2481,7 +3229,7 @@ def _summarize_syslog_window(hours: int = 24, max_events: int = 4000) -> dict:
 
 @app.route("/api/syslog/analyze", methods=["POST"])
 def syslog_analyze():
-    """Marvis-style network-health briefing. Aggregates the recent syslog
+    """Network-health briefing. Aggregates the recent syslog
     window + client identification and asks Gemini to surface the top issues,
     likely root causes, and recommended actions — a 'morning cup of coffee'
     view of what needs attention."""
@@ -2531,6 +3279,9 @@ def syslog_analyze():
         "4. Note what looks normal/healthy so the operator isn't alarmed by "
         "routine churn (a phone connecting/disconnecting as someone comes and "
         "goes is normal; a stationary IoT device flapping 50x/hour is not).\n"
+        "5. The data includes a 'failing_clients' list (devices with repeated "
+        "short sessions — disconnects within 60s of connecting). If non-empty, "
+        "highlight these as connection-stability problems and name them.\n"
         "\n"
         "Be specific and grounded in the data provided — don't invent events. "
         "If the data is benign, say so plainly rather than manufacturing "
@@ -3064,6 +3815,9 @@ def _build_chat_system_prompt(scope: str, clients: list) -> str:
         "trend that a picture would clarify, set chart=true so the UI draws "
         "it — then summarize the key takeaway in text above it. Don't chart a "
         "single number.\n"
+        "  • failing_clients — devices with an unhealthy connect/disconnect "
+        "pattern (repeated short sessions). For 'which devices are having "
+        "connection problems' or 'anything dropping off the network'.\n"
         "After calling tools, synthesize the results into a clear, grounded "
         "answer. If a tool returns zero events, say so plainly rather than "
         "speculating. Cite the actual numbers you got back. The system handles "
@@ -3092,11 +3846,11 @@ def _build_chat_system_prompt(scope: str, clients: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Marvis-style query tools for the chatbot
+# Query tools for the chatbot
 # ---------------------------------------------------------------------------
 # Gemini drives the conversation in natural language but, instead of guessing,
 # it calls these structured tools to read real data — the modern equivalent of
-# Marvis's LIST / COUNT / STATUSOF / TROUBLESHOOT / ROAMINGOF query language.
+# A LIST / COUNT / STATUSOF / TROUBLESHOOT / ROAMINGOF style query language.
 # Each tool returns plain dicts/lists that get fed back to the model.
 
 # Gemini function-calling schema (subset of OpenAPI). Declared once, sent with
@@ -3222,6 +3976,22 @@ CHAT_TOOLS = [{
                     "chart_type": {"type": "string", "description": "bar | line | doughnut. Defaults: bar for rankings, line for time."},
                 },
                 "required": ["group_by"],
+            },
+        },
+        {
+            "name": "failing_clients",
+            "description": "List persistently failing clients — devices with an "
+                           "unhealthy connect/disconnect pattern (repeated short "
+                           "sessions, disconnects outnumbering connects). Use for "
+                           "'which devices are having connection problems', 'any "
+                           "failing clients', 'what's dropping off the network'. "
+                           "Returns each device with its short-session count and a "
+                           "severity score.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number", "description": "Look-back window in hours (default 24)."},
+                },
             },
         },
     ]
@@ -3469,6 +4239,24 @@ def _tool_roaming_of(args: dict) -> dict:
     return result
 
 
+def _tool_failing_clients(args: dict) -> dict:
+    """Return persistently failing clients by reusing the SLE dashboard's
+    detection (short sessions, disconnect/connect imbalance). Keeps one source
+    of truth for the algorithm."""
+    hours = float(args.get("hours") or 24)
+    with app.test_request_context(f"/api/sle?hours={int(hours)}"):
+        data = sle_dashboard().get_json()
+    failing = data.get("failing_clients", [])
+    return {
+        "window_hours": data.get("window_hours"),
+        "count": len(failing),
+        "failing_clients": failing,
+        "note": ("None found — all devices that connected stayed connected."
+                 if not failing else
+                 "A 'short session' is a disconnect within 60s of connecting."),
+    }
+
+
 def _tool_aggregate_events(args: dict) -> dict:
     """One-shot aggregation: group events and return ranked buckets with counts,
     percentages, and per-hour rates. Optionally emits a chart spec the frontend
@@ -3591,6 +4379,8 @@ def _execute_chat_tool(name: str, args: dict, clients: list) -> dict:
             return _tool_roaming_of(args)
         if name == "aggregate_events":
             return _tool_aggregate_events(args)
+        if name == "failing_clients":
+            return _tool_failing_clients(args)
         return {"error": f"unknown tool {name}"}
     except Exception as exc:
         log.exception("chat tool %s failed", name)
@@ -3652,7 +4442,7 @@ def chat():
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model_id}:generateContent")
 
-    # Tool-using loop: Gemini may call our Marvis-style query tools to read
+    # Tool-using loop: Gemini may call our query tools to read
     # real data before answering. We run up to a few rounds of
     # call → execute → feed-back until it produces a text answer.
     tool_trace = []

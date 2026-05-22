@@ -9,9 +9,9 @@ A self-hosted dashboard for identifying, naming, and managing every client on yo
 - **All clients in one table** — name, MAC, IP, OS, vendor, AP/switch, DHCP fingerprint, mDNS services
 - **Auto-identification** — DHCP fingerprints captured passively, looked up against Fingerbank, optionally analyzed by Gemini for a full device dossier
 - **Naming policy** — define a template (e.g. `{type}-{vendor}-{lastoctet}`), apply across the fleet, push back to Omada
-- **Marvis-style AIOps chatbot** — ask questions in plain English and Gemini answers from your *real* event data, not guesses. It calls structured query tools under the hood (find a device, count events, rank top talkers, troubleshoot, roaming history) and shows you which tools it ran. "How many times did my iPad disconnect today?" → it resolves the device, counts the actual events, and answers grounded in the number.
+- **AIOps chatbot** — ask questions in plain English and Gemini answers from your *real* event data, not guesses. It calls structured query tools under the hood (find a device, count events, rank top talkers, troubleshoot, roaming history) and shows you which tools it ran. "How many times did my iPad disconnect today?" → it resolves the device, counts the actual events, and answers grounded in the number.
 - **Charts in chat** — when the answer is a ranking, distribution, or trend, the assistant draws an inline chart (top talkers, event-type breakdown, activity over time)
-- **Syslog ingestion + network-health briefing** — receive your Omada controller's syslog, store it, visualize it (timeline, top talkers, event types, all time-windowed), and get an on-demand Marvis-style briefing: top issues, flapping devices, repeated auth failures, root-cause hypotheses, recommended actions
+- **Syslog ingestion + network-health briefing** — receive your Omada controller's syslog, store it, visualize it (timeline, top talkers, event types, all time-windowed), and get an on-demand network-health briefing: top issues, flapping devices, repeated auth failures, root-cause hypotheses, recommended actions
 - **Access-point awareness** — AP MACs in flow logs are resolved to their Omada names (so "rumpus" and "hallway" appear instead of bare MACs) and clearly distinguished from client devices everywhere they show up
 - **Traffic-flow noise control** — Omada's high-volume firewall/flow logging can be dropped at ingest with one toggle, keeping the event store full of meaningful lifecycle events
 - **No upstream router cooperation needed** — sniffs DHCP and mDNS directly from the host's NIC
@@ -130,7 +130,7 @@ The first run will be quiet — DHCP fingerprints take time to accumulate (one p
 
 ## Step 5 — Syslog + network health AI (optional)
 
-Feed your Omada controller's syslog to the dashboard to unlock event history and the Marvis-style network-health briefing.
+Feed your Omada controller's syslog to the dashboard to unlock event history and the network-health briefing.
 
 ### Enable syslog export on Omada
 
@@ -166,9 +166,9 @@ Omada's firewall/flow logging is very high-volume and mostly noise for AIOps. Th
 
 Click **✨ Analyze network** in the Syslog view. Gemini reviews the selected window of events alongside your device identifications and produces a briefing: an overall health verdict, the top issues worth attention (with the specific devices and likely root causes), security flags (e.g. distinguishing a stale saved password from a brute-force attempt), and a note on what's normal so routine churn doesn't alarm you. Device MACs in the briefing are clickable, and access points are labelled as infrastructure rather than mistaken for chatty clients.
 
-### Ask the chatbot (Marvis-style)
+### Ask the chatbot
 
-The 💬 **Chat** button (on the Clients view toolbar) opens a conversational assistant that answers from your real event data. Instead of guessing, Gemini calls structured query tools — the modern equivalent of Juniper Marvis's `LIST` / `COUNT` / `STATUSOF` / `TROUBLESHOOT` / `ROAMINGOF` query language — and grounds its answer in what they return. The status line under each reply shows which tools it ran.
+The 💬 **Chat** button (on the Clients view toolbar) opens a conversational assistant that answers from your real event data. Instead of guessing, Gemini calls structured query tools — a structured `LIST` / `COUNT` / `STATUSOF` / `TROUBLESHOOT` / `ROAMINGOF` style query language — and grounds its answer in what they return. The status line under each reply shows which tools it ran.
 
 Things you can ask:
 
@@ -299,7 +299,7 @@ Your SQLite database in `./instance/` persists across upgrades, so all your save
 - Syslog parser now unpacks JSON-bodied controller events (e.g. `{"operation":"..."}`) into readable messages instead of storing raw JSON, and hardened against empty/control-only continuation fragments.
 
 ### 0.2.0
-- **Marvis-style tool-using chatbot** — Gemini now answers from real event data via structured query tools (find device, count, list, rank, troubleshoot, roaming, aggregate) instead of guessing, and shows which tools it ran
+- **Tool-using chatbot** — Gemini now answers from real event data via structured query tools (find device, count, list, rank, troubleshoot, roaming, aggregate) instead of guessing, and shows which tools it ran
 - **Charts in chat** — ranked, distribution, and trend answers render as inline charts
 - **Syslog graphs** — event-activity timeline, top talkers, and event-type breakdown, all time-windowed (15 min → 7 days), with the window also driving the AI briefing
 - **Access-point name resolution** — AP MACs from flow logs resolve to their Omada names across graphs, briefing, and chat, and are clearly marked as infrastructure (new `/api/aps` diagnostic endpoint)
