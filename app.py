@@ -712,12 +712,10 @@ if SYSLOG_ENABLED:
 else:
     log.info("Syslog ingestion disabled via SYSLOG_ENABLED=0")
 
-# Client metrics poller (opt-in). Snapshots per-client RF/health stats over
-# time into ClientMetric. Started here so it shares the app/DB context.
-if METRICS_POLL_ENABLED:
-    threading.Thread(target=_metrics_poller_loop, daemon=True, name="metrics-poller").start()
-else:
-    log.info("Client metrics poller disabled (METRICS_POLL_ENABLED=0)")
+# NOTE: the client metrics poller is started further down, AFTER
+# _metrics_poller_loop is defined (see _start_metrics_poller()). Starting it
+# here would NameError because the function doesn't exist yet at this point in
+# module load order.
 
 
 def get_setting(mac: str) -> DeviceSetting | None:
@@ -1143,6 +1141,15 @@ def _metrics_poller_loop():
         except Exception:
             log.exception("metrics poller loop error")
         _time.sleep(METRICS_POLL_INTERVAL)
+
+
+# Now that _metrics_poller_loop is defined, start it (opt-in). Placed here
+# rather than near the syslog start so the function is already defined at
+# module-load time.
+if METRICS_POLL_ENABLED:
+    threading.Thread(target=_metrics_poller_loop, daemon=True, name="metrics-poller").start()
+else:
+    log.info("Client metrics poller disabled (METRICS_POLL_ENABLED=0)")
 
 
 
